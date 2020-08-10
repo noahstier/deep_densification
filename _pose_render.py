@@ -26,7 +26,7 @@ r = pyrender.OffscreenRenderer(400, 400)
 for i in tqdm.trange(n):
     rotmat = scipy.spatial.transform.Rotation.random().as_matrix()
     rotmats.append(rotmat)
-    t = np.array([0, 0, -.35])
+    t = np.array([0, 0, -0.35])
     pose = np.concatenate((np.c_[rotmat, t], [[0, 0, 0, 1]]), axis=0)
     fuze_trimesh.apply_transform(pose)
     mesh = pyrender.Mesh.from_trimesh(fuze_trimesh)

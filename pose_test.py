@@ -37,7 +37,9 @@ nbins = 36
 
 x, y, z = np.linspace(np.zeros(3), np.ones(3) * 2 * np.pi, nbins, axis=1)
 xx, yy, zz = np.meshgrid(x, y, z)
-all_quats = scipy.spatial.transform.Rotation.from_euler('xyz', np.c_[xx.flatten(), yy.flatten(), zz.flatten()]).as_quat()
+all_quats = scipy.spatial.transform.Rotation.from_euler(
+    "xyz", np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
+).as_quat()
 
 
 class FCLayer(torch.nn.Module):
@@ -123,12 +125,7 @@ loader = torch.utils.data.DataLoader(
 
 s = np.sqrt(2) / 2
 camera_pose = np.array(
-    [
-        [0.0, -s, s, 0.3],
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, s, s, 0.35],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
+    [[0.0, -s, s, 0.3], [1.0, 0.0, 0.0, 0.0], [0.0, s, s, 0.35], [0.0, 0.0, 0.0, 1.0],]
 )
 
 
@@ -149,7 +146,7 @@ if _wandb:
 opt = torch.optim.Adam(model.parameters())
 
 
-crossentropy = torch.nn.CrossEntropyLoss(reduction='none')
+crossentropy = torch.nn.CrossEntropyLoss(reduction="none")
 
 for batch in tqdm.tqdm(loader):
     opt.zero_grad()
@@ -159,9 +156,9 @@ for batch in tqdm.tqdm(loader):
     loss_weights = loss_weights.cuda()
     gt_quat = gt_quat.numpy()
 
-    gt_euler = scipy.spatial.transform.Rotation.from_quat(gt_quat).as_euler('xyz')
+    gt_euler = scipy.spatial.transform.Rotation.from_quat(gt_quat).as_euler("xyz")
 
-    '''
+    """
     gt_inds = np.clip(np.floor((euler + np.pi) / (2 * np.pi) * nbins), 0, nbins - 1).astype(int)
     gt_quats = all_quats[gt_inds[:, 0], gt_inds[:, 1], gt_inds[:, 2]]
     gt = (
@@ -171,7 +168,7 @@ for batch in tqdm.tqdm(loader):
         .long()
         .cuda()
     )
-    '''
+    """
 
     feats = model["cnn"](rgb_img_t).mean([2, 3])
     logits = model["predictor_mlp"](feats)
@@ -183,18 +180,23 @@ for batch in tqdm.tqdm(loader):
     j = 0
     view_preds = []
     for j in range(batch_size):
-        xx, yy, zz = torch.meshgrid(angle_preds[j, 0], angle_preds[j, 1], angle_preds[j, 2])
-        view_preds.append(torch.prod(torch.stack((xx.flatten(), yy.flatten(), zz.flatten()), axis=0), dim=0))
+        xx, yy, zz = torch.meshgrid(
+            angle_preds[j, 0], angle_preds[j, 1], angle_preds[j, 2]
+        )
+        view_preds.append(
+            torch.prod(
+                torch.stack((xx.flatten(), yy.flatten(), zz.flatten()), axis=0), dim=0
+            )
+        )
     view_preds = torch.stack(view_preds, axis=0)
 
-    '''
+    """
     _logits = logits.detach().cpu().numpy().reshape(batch_size, 3, -1)
     preds = np.exp(_logits) / np.sum(np.exp(_logits), axis=-1, keepdims=True)
     preds = np.argmax(preds, axis=-1) * 2 * np.pi / nbins
     pred_quats = scipy.spatial.transform.Rotation.from_euler("xyz", preds).as_quat()
     pred_quat_dists = 2 * np.arccos(np.abs(np.sum(pred_quats * gt_quats, axis=1)))
-    '''
-
+    """
 
     loss = torch.sum(loss_weights * view_preds)
     loss.backward()
@@ -205,16 +207,14 @@ for batch in tqdm.tqdm(loader):
     pred_quats = all_quats[pred_quat_inds]
 
     mean_pred_dist = np.mean(
-        2 * np.arccos(
-            np.clip(np.abs(np.sum(gt_quat * pred_quats, axis=-1)), 0, 1)
-        )
+        2 * np.arccos(np.clip(np.abs(np.sum(gt_quat * pred_quats, axis=-1)), 0, 1))
     )
     gt_dists = 2 * np.arccos(
         np.clip(np.abs(np.sum(gt_quat[None] * gt_quat[:, None], axis=-1)), 0, 1)
     )
     mean_gt_dist = np.sum(gt_dists) / (len(gt_dists) ** 2 - len(gt_dists))
 
-    '''
+    """
     j = 4
     subplot(221)
     imshow(plt.imread('eye.png'))
@@ -234,7 +234,7 @@ for batch in tqdm.tqdm(loader):
     plot(verts[:, 0], verts[:, 1], verts[:, 2], '.')
     plot(verts_t[:, 0], verts_t[:, 1], verts_t[:, 2], '.')
     plot([.3], [0], [.35], '.')
-    '''
+    """
 
     break
     v_t = gt @ v
@@ -248,7 +248,6 @@ for batch in tqdm.tqdm(loader):
     gt_x[gt_inds[:, 0]] = 1
     gt_y[gt_inds[:, 0]] = 1
     gt_z[gt_inds[:, 0]] = 1
-
 
     bin_edges = np.linspace(0, 360, nbins + 1)
     angle_preds = np.mean(angle_preds.detach().cpu().numpy(), axis=0)
