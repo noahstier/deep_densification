@@ -12,4 +12,8 @@ n_pointnet_pts = 256
 img_batch_size = 2
 pt_batch_size = 256
 
-wandb = True
+
+n_anchors = 32
+n_queries_per_anchor = 64
+
+wandb = False

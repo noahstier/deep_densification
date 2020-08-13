@@ -113,7 +113,7 @@ house_dirs = sorted(
 test_house_dirs = house_dirs[:10]
 train_house_dirs = house_dirs[10:]
 
-house_dir = test_house_dirs[0]
+house_dir = test_house_dirs[3]
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
@@ -160,10 +160,9 @@ depth_imgs = (
 model = torch.nn.ModuleDict(
     {
         "mlp": torch.nn.Sequential(
-            FCLayer(70, 1024),
-            FCLayer(1024, 512),
-            FCLayer(512),
-            FCLayer(512),
+            FCLayer(67, 128),
+            FCLayer(128, 256),
+            FCLayer(256, 512),
             FCLayer(512),
             FCLayer(512),
             FCLayer(512, 256),
@@ -175,7 +174,7 @@ model = torch.nn.ModuleDict(
         "cnn": unet.UNet(n_channels=3),
     }
 )
-model.load_state_dict(torch.load("models/depth-cond-anchor-70359"))
+model.load_state_dict(torch.load("models/depth-cond-anchor-123129"))
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -195,7 +194,7 @@ for i, im_id in enumerate(im_ids):
         [[*r[0], t[0]], [*r[1], t[1]], [*r[2], t[2]], [0, 0, 0, 1]]
     )
 
-img_ind = 10
+img_ind = 100
 
 res = 0.02
 x = np.arange(-0.2, 0.2, res)
@@ -203,8 +202,6 @@ y = np.arange(-0.2, 0.2, res)
 z = np.arange(-0.2, 0.2, res)
 xx, yy, zz = np.meshgrid(x, y, z)
 query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
-query_coords = positional_encoding(query_offsets / 0.2, L=1)
-query_coords = torch.Tensor(query_coords).cuda()
 
 x = np.arange(len(x), dtype=int)
 y = np.arange(len(y), dtype=int)
@@ -214,7 +211,7 @@ query_inds = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
 
 depth_img = depth_imgs[img_ind]
 uu, vv = np.meshgrid(
-    np.arange(0, depth_img.shape[1], 10), np.arange(0, depth_img.shape[0], 160)
+    np.arange(50, depth_img.shape[1], 40), np.arange(50, depth_img.shape[0], 40)
 )
 anchor_uv = np.c_[uu.flatten(), vv.flatten()]
 anchor_xyz_cam = (
@@ -226,6 +223,45 @@ anchor_xyz = (
 
 pred_vols = np.empty((len(anchor_uv), *xx.shape))
 
+anchor_xyz_cam_u = anchor_xyz_cam / np.linalg.norm(
+    anchor_xyz_cam, axis=-1, keepdims=True
+)
+center_pixel_u = np.array([0, 0, 1])
+cross = np.cross(center_pixel_u, anchor_xyz_cam_u)
+cross /= np.linalg.norm(cross, axis=-1, keepdims=True)
+dot = np.dot(center_pixel_u, anchor_xyz_cam_u.T)
+axis = cross
+angle = np.arccos(dot)
+cam2anchor_rot = scipy.spatial.transform.Rotation.from_rotvec(
+    axis * angle[:, None]
+).as_matrix()
+
+anchor_xyz_cam_rotated = np.stack(
+    [
+        (np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]).T
+        for i in range(len(anchor_xyz_cam))
+    ],
+    axis=0,
+)
+
+query_xyz_cam_rotated = query_offsets[None] + anchor_xyz_cam_rotated[:, None]
+query_xyz_cam = np.stack(
+    [
+        (cam2anchor_rot[i] @ query_xyz_cam_rotated[i].T).T
+        for i in range(len(anchor_xyz_cam_rotated))
+    ],
+    axis=0,
+)
+query_uv = np.stack([(camera_intrinsic @ query_xyz_cam[i].T).T for i in range(len(query_xyz_cam))])
+query_uv = query_uv[..., :2] / query_uv[..., 2:]
+query_xyz = np.stack(
+    [
+        (camera_extrinsics[img_ind] @ np.c_[query_xyz_cam[i], np.ones(len(query_xyz_cam[i]))].T).T[:, :3]
+        for i in range(len(query_xyz_cam))
+    ],
+    axis=0,
+)
+query_coords = torch.Tensor((query_xyz_cam_rotated - anchor_xyz_cam_rotated[:, None]) / 0.2).cuda()
 
 img_feat = torch.relu(cnn(imgs_t[None, img_ind]))
 anchor_uv_t = (
@@ -238,12 +274,14 @@ pixel_feats = interp_img(img_feat[0], torch.Tensor(anchor_uv_t).cuda()).T
 anchors_per_batch = 24
 for i in tqdm.trange(int(np.ceil(len(anchor_uv) / anchors_per_batch))):
     start = i * anchors_per_batch
-    end = (i + 1) * anchors_per_batch
+    end = np.minimum(len(pixel_feats), (i + 1) * anchors_per_batch)
 
     mlp_input = torch.cat(
         (
-            query_coords[None, :, None, :].repeat(1, 1, anchors_per_batch, 1),
-            pixel_feats[None, None, start:end].repeat(1, len(query_coords), 1, 1),
+            query_coords[None, start:end],
+            pixel_feats[None, start:end, None].repeat(
+                1, 1, query_coords.shape[1], 1
+            ),
         ),
         dim=-1,
     )
@@ -252,14 +290,47 @@ for i in tqdm.trange(int(np.ceil(len(anchor_uv) / anchors_per_batch))):
 
     preds = torch.sigmoid(logits).cpu().numpy()[0, ..., 0]
 
-    pred_vols[start:end, query_inds[:, 0], query_inds[:, 1], query_inds[:, 2]] = preds.T
+    pred_vols[start:end, query_inds[:, 1], query_inds[:, 0], query_inds[:, 2]] = preds
+
+'''
+j = 4
+imshow(imgs[img_ind])
+plot(anchor_uv[j, 0], anchor_uv[j, 1], 'r.')
+plot(query_uv[j, :, 0], query_uv[j, :, 1], 'b.', markersize=1)
+
+j = 4
+verts, faces, _, _, = skimage.measure.marching_cubes(pred_vols[j], level=0.5)
+verts = verts[:, [1, 0, 2]]
+faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
+verts = (verts - np.array(xx.shape) / 2) * res + anchor_xyz_cam_rotated[j]
+verts_cam = (cam2anchor_rot[j] @ verts.T).T
+verts_world = (
+    camera_extrinsics[img_ind] @ np.c_[verts_cam, np.ones(len(verts_cam))].T
+).T[:, :3]
+
+mesh = o3d.geometry.TriangleMesh(
+    o3d.utility.Vector3dVector(verts_world), o3d.utility.Vector3iVector(faces)
+)
+mesh.compute_vertex_normals()
+mesh.compute_triangle_normals()
+
+pred_inds = np.round(pred_vols[j].flatten()).astype(np.bool)
+pos_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_xyz[j, pred_inds]))
+neg_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_xyz[j, ~pred_inds]))
+pos_pcd.paint_uniform_color(np.array([0, 0, 1], dtype=np.float64))
+neg_pcd.paint_uniform_color(np.array([1, 0, 0], dtype=np.float64))
+o3d.visualization.draw_geometries([gt_pcd, mesh, pos_pcd, neg_pcd])
+'''
 
 meshes = []
 for i in range(len(pred_vols)):
     verts, faces, _, _, = skimage.measure.marching_cubes(pred_vols[i], level=0.5)
-    faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
 
-    verts_cam = (verts - np.array(xx.shape) / 2) * res + anchor_xyz_cam[i]
+    verts = verts[:, [1, 0, 2]]
+    faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
+    
+    verts = (verts - np.array(xx.shape) / 2) * res + anchor_xyz_cam_rotated[i]
+    verts_cam = (cam2anchor_rot[i] @ verts.T).T
     verts_world = (
         camera_extrinsics[img_ind] @ np.c_[verts_cam, np.ones(len(verts_cam))].T
     ).T[:, :3]
@@ -267,10 +338,25 @@ for i in range(len(pred_vols)):
     mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(verts_world), o3d.utility.Vector3iVector(faces)
     )
-    mesh.paint_uniform_color(np.array(plt.cm.jet(np.random.rand()))[:3])
+    # mesh.paint_uniform_color(np.array(plt.cm.jet(np.random.rand()))[:3])
     mesh.compute_vertex_normals()
     mesh.compute_triangle_normals()
     meshes.append(mesh)
+
+
+'''
+pcd = o3d.geometry.PointCloud()
+# for j in range(len(anchor_uv)):
+for j in range(20):
+    pred_inds = np.round(pred_vols[j].flatten()).astype(np.bool)
+    pos_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_xyz[j, pred_inds]))
+    neg_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_xyz[j, ~pred_inds]))
+    pos_pcd.paint_uniform_color(np.array([0, 0, 1], dtype=np.float64))
+    neg_pcd.paint_uniform_color(np.array([1, 0, 0], dtype=np.float64))
+    pcd += pos_pcd
+    pcd += neg_pcd
+o3d.visualization.draw_geometries([pcd, *meshes[:20]])
+'''
 
 
 gt_xyz = fusion_npz["tsdf_point_cloud"][:, :3]
@@ -292,16 +378,19 @@ gt_rgb = gt_rgb[inds]
 gt_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(gt_xyz))
 gt_pcd.colors = o3d.utility.Vector3dVector(gt_rgb)
 
-anchor_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(anchor_xyz))
-anchor_pcd.paint_uniform_color(np.array([0, 0, 1], dtype=np.float64))
-
 cam_pcd = o3d.geometry.PointCloud(
     o3d.utility.Vector3dVector(camera_extrinsics[img_ind : img_ind + 1, :3, 3])
 )
 cam_pcd.paint_uniform_color(np.array([1, 0, 0], dtype=np.float64))
 
+# mesh = sum(meshes[::2])
+anchor_inds = np.arange(len(meshes))
+anchor_inds = np.random.choice(anchor_inds, size=10, replace=False)
+mesh = sum([meshes[i] for i in anchor_inds])
 
-mesh = sum(meshes[::5])
+anchor_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(anchor_xyz[anchor_inds]))
+anchor_pcd.paint_uniform_color(np.array([0, 0, 1], dtype=np.float64))
+
 
 geoms = [mesh, gt_pcd, anchor_pcd, cam_pcd]
 visibility = [True] * len(geoms)
@@ -320,3 +409,11 @@ callbacks = {}
 for i in range(len(geoms)):
     callbacks[ord(str(i + 1))] = functools.partial(toggle_geom, geom_ind=i)
 o3d.visualization.draw_geometries_with_key_callbacks(geoms, callbacks)
+
+
+"""
+
+pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector((query_inds - np.array(xx.shape) / 2) * res + anchor_xyz_cam_rotated[0]))
+pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(pred_vols[0].flatten())[:, :3])
+o3d.visualization.draw_geometries([mesh, pcd])
+"""

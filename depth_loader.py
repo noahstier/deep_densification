@@ -8,6 +8,7 @@ import numba
 import numpy as np
 import PIL.Image
 import scipy.spatial
+import open3d as o3d
 import torch
 import torchvision
 import tqdm
@@ -97,6 +98,8 @@ class Dataset(torch.utils.data.Dataset):
         query_uv = query_xyz_cam @ intrinsic.T
         query_uv = query_uv[:, :2] / query_uv[:, 2:]
 
+        # narrow down query points to within frustum, and shuffle them
+
         inds = (
             (query_xyz_cam[:, 2] > 0)
             & (query_uv[:, 0] >= 0)
@@ -108,6 +111,8 @@ class Dataset(torch.utils.data.Dataset):
         inds = np.argwhere(inds).flatten()
         np.random.shuffle(inds)
 
+        # pick anchors at pixels where there is already a query point --
+        # better chance that there will be enough query points around this anchor
         anchor_inds = np.random.choice(inds, size=self.n_anchors * 3, replace=False)
         anchor_uv = query_uv[anchor_inds]
         anchor_uv_inds = np.floor(anchor_uv).astype(int)
@@ -147,19 +152,14 @@ class Dataset(torch.utils.data.Dataset):
         anchor_cam_unit = anchor_xyz_cam / np.linalg.norm(
             anchor_xyz_cam, axis=-1, keepdims=True
         )
-        cross = np.c_[
-            -anchor_xyz_cam[:, 1], anchor_xyz_cam[:, 0], np.zeros(len(anchor_xyz_cam))
-        ]
+        center_pixel_u = np.array([0, 0, 1])
+        cross = np.cross(center_pixel_u, anchor_cam_unit)
         cross /= np.linalg.norm(cross, axis=-1, keepdims=True)
-        dot = anchor_cam_unit[:, 2]
+        dot = np.dot(center_pixel_u, anchor_cam_unit.T)
         axis = cross
         if np.any(np.isnan(axis)):
             return self[np.random.randint(0, len(self))]
         angle = np.arccos(dot)
-
-        angle = np.random.uniform(0, 2 * np.pi, size=angle.shape)
-        axis = np.c_[np.random.uniform(-1, 1, size=(len(axis), 2)), np.zeros(len(axis))]
-        axis /= np.linalg.norm(axis, axis=-1, keepdims=True)
 
         cam2anchor_rot = scipy.spatial.transform.Rotation.from_rotvec(
             axis * angle[:, None]
@@ -181,11 +181,10 @@ class Dataset(torch.utils.data.Dataset):
             axis=0,
         )
 
-        rel_query_xyz = query_xyz_rotated - anchor_xyz_rotated[:, None]
-
-        query_coords = positional_encoding(
-            (query_xyz_rotated - anchor_xyz_rotated[:, None]) / 0.2, L=1
-        )
+        query_coords = (query_xyz_rotated - anchor_xyz_rotated[:, None]) / 0.2
+        # query_coords = positional_encoding(
+        #     (query_xyz_rotated - anchor_xyz_rotated[:, None]) / 0.2, L=1
+        # )
         query_occ = query_tsdf < 0
 
         pil_img = PIL.Image.open(rgb_imgfile)
@@ -200,6 +199,102 @@ class Dataset(torch.utils.data.Dataset):
             anchor_uv / [imwidth, imheight] * [rgb_img_t.shape[2], rgb_img_t.shape[1]]
         )
 
+        """
+        sfm_ptfile = os.path.join(house_dir, "sfm/sparse/auto/points3D.bin")
+        pts = colmap_reader.read_points3d_binary(sfm_ptfile)
+        pts = {
+            pt_id: pt
+            for pt_id, pt in pts.items()
+            if pt.error < 1 and len(pt.image_ids) >= 5
+        }
+        pt_ids = sorted(pts.keys())
+        sfm_xyz = np.stack([pts[i].xyz for i in pt_ids], axis=0)
+        sfm_rgb = np.stack([pts[i].rgb for i in pt_ids], axis=0)
+
+        sfm_xyz_cam = (
+            np.linalg.inv(extrinsic) @ np.c_[sfm_xyz, np.ones(len(sfm_xyz))].T
+        ).T[:, :3]
+        sfm_uv = (intrinsic @ sfm_xyz_cam.T).T
+        sfm_uv = sfm_uv[:, :2] / sfm_uv[:, 2:]
+        inds = (
+            (sfm_xyz_cam[:, 2] > 0)
+            & (sfm_uv[:, 0] >= 0)
+            & (sfm_uv[:, 1] >= 0)
+            & (sfm_uv[:, 0] < imwidth)
+            & (sfm_uv[:, 1] < imheight)
+        )
+
+        sfm_xyz_cam_rotated = np.stack(
+            [
+                (np.linalg.inv(cam2anchor_rot[i]) @ sfm_xyz_cam.T).T
+                for i in range(len(anchor_xyz_cam))
+            ],
+            axis=0,
+        )
+
+
+        figure()
+        subplot(121)
+        imshow(rgb_img)
+        scatter(sfm_uv[inds, 0], sfm_uv[inds, 1], c=sfm_rgb[inds].astype(np.float32) / 255)
+        gcf().add_subplot(122, projection='3d')
+        gca().scatter(
+            sfm_xyz[inds, 0],
+            sfm_xyz[inds, 1],
+            sfm_xyz[inds, 2],
+            c=sfm_rgb[inds].astype(np.float32) / 255
+        )
+        plot([extrinsic[0, 3]], [extrinsic[1, 3]], [extrinsic[2, 3]], 'b.')
+
+        gcf().add_subplot(121, projection='3d')
+        plot(sfm_xyz[inds, 0], sfm_xyz[inds, 1], sfm_xyz[inds, 2], '.') #, c=sfm_rgb[inds].astype(np.float32) / 255)
+        plot([extrinsic[0, 3]], [extrinsic[1, 3]], [extrinsic[2, 3]], '.')
+        subplot(122)
+        imshow(rgb_img)
+        xlabel('x')
+        ylabel('y')
+
+        gcf().add_subplot(121, projection='3d')
+        plot(sfm_xyz_cam[inds, 0], sfm_xyz_cam[inds, 1], sfm_xyz_cam[inds, 2], '.') #, c=sfm_rgb[inds].astype(np.float32) / 255)
+        plot([0], [0], [0], '.')
+        xlabel('x')
+        ylabel('y')
+        subplot(122)
+        imshow(rgb_img)
+
+        qxr_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_xyz_rotated[j]))
+        qxr_pcd.colors = o3d.utility.Vector3dVector(np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)])
+
+        sxr_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(sfm_xyz_cam_rotated[j]))
+        sxr_pcd.colors = o3d.utility.Vector3dVector(sfm_rgb.astype(float) / 255)
+        o3d.visualization.draw_geometries([qxr_pcd, sxr_pcd])
+
+        figure()
+        gcf().add_subplot(121, projection='3d')
+        gca().scatter(
+            query_xyz_rotated[j, :, 0],
+            query_xyz_rotated[j, :, 1],
+            query_xyz_rotated[j, :, 2],
+            s=1,
+            c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)],
+        )
+        plot(*[[i] for i in anchor_xyz_rotated[j]], '.')
+        xlabel('x')
+        ylabel('y')
+        plot([0], [0], [0], 'g.')
+        gca().scatter(
+            sfm_xyz_cam_rotated[j, inds, 0],
+            sfm_xyz_cam_rotated[j, inds, 1],
+            sfm_xyz_cam_rotated[j, inds, 2],
+            s=1,
+            c=sfm_rgb[inds].astype(np.float32) / 255,
+        )
+
+        subplot(122)
+        imshow(rgb_img)
+        plot(query_uv[0, :, 0], query_uv[0, :, 1], '.')
+        """
+
         return (
             query_coords.astype(np.float32),
             query_occ,
@@ -212,6 +307,7 @@ class Dataset(torch.utils.data.Dataset):
             anchor_xyz_cam,
             rgb_img_t,
             rgb_img,
+            depth_img,
             extrinsic,
             intrinsic,
         )
@@ -278,7 +374,7 @@ if __name__ == "__main__":
     """
 
     dset = Dataset(house_dirs, n_anchors=16, n_queries_per_anchor=128)
-    index = 0
+    index = 10000
     self = dset
 
     (
@@ -288,8 +384,12 @@ if __name__ == "__main__":
         query_uv_t,
         query_xyz,
         query_xyz_cam,
+        anchor_uv,
+        anchor_uv_t,
+        anchor_xyz_cam,
         rgb_img_t,
         rgb_img,
+        depth_img,
         extrinsic,
         intrinsic,
     ) = dset[index]
@@ -320,13 +420,14 @@ if __name__ == "__main__":
         & (sfm_uv[:, 1] < imheight)
     )
 
+    j = 0
     subplot(131)
     imshow(rgb_img)
     scatter(
-        query_uv[:, 0],
-        query_uv[:, 1],
+        query_uv[j, :, 0],
+        query_uv[j, :, 1],
         s=1,
-        c=plt.cm.jet(np.linspace(0, 1, len(query_uv))),
+        c=plt.cm.jet(np.linspace(0, 1, query_uv.shape[1])),
     )
     axis("off")
 
@@ -339,11 +440,11 @@ if __name__ == "__main__":
         c=sfm_rgb.astype(np.float32) / 255,
     )
     gca().scatter(
-        query_xyz[:, 0],
-        query_xyz[:, 1],
-        query_xyz[:, 2],
+        query_xyz[j, :, 0],
+        query_xyz[j, :, 1],
+        query_xyz[j, :, 2],
         s=1,
-        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ.astype(int)],
+        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)],
     )
     plot([extrinsic[0, 3]], [extrinsic[1, 3]], [extrinsic[2, 3]], "g.")
 
@@ -356,12 +457,51 @@ if __name__ == "__main__":
         c=sfm_rgb[inds].astype(np.float32) / 255,
     )
     gca().scatter(
-        query_xyz_cam[:, 0],
-        query_xyz_cam[:, 1],
-        query_xyz_cam[:, 2],
+        query_xyz_cam[j, :, 0],
+        query_xyz_cam[j, :, 1],
+        query_xyz_cam[j, :, 2],
         s=1,
-        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ.astype(int)],
+        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)],
     )
     plot([0], [0], [0], "g.")
+    xlabel("x")
+    ylabel("y")
 
     tight_layout()
+
+    # check depth projection
+    x = np.arange(depth_img.shape[1])
+    y = np.arange(depth_img.shape[0])
+    xx, yy = np.meshgrid(x, y)
+    uv = np.c_[xx.flatten(), yy.flatten()]
+    pixel_u = (np.linalg.inv(intrinsic) @ np.c_[uv, np.ones(len(uv))].T).T
+    pixel_u /= np.linalg.norm(pixel_u, axis=-1, keepdims=True)
+    pixel_ranges = depth_img[uv[:, 1], uv[:, 0]]
+    xyz_cam = pixel_u * pixel_ranges[:, None]
+    xyz = (extrinsic @ np.c_[xyz_cam, np.ones(len(xyz_cam))].T).T[:, :3]
+    figure()
+    subplot(121)
+    imshow(depth_img)
+    gcf().add_subplot(122, projection="3d")
+    plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], ".", markersize=0.1)
+    plot([extrinsic[0, 3]], [extrinsic[1, 3]], [extrinsic[2, 3]], ".")
+    gca().scatter(
+        sfm_xyz[inds, 0],
+        sfm_xyz[inds, 1],
+        sfm_xyz[inds, 2],
+        c=sfm_rgb[inds].astype(np.float32) / 255,
+    )
+
+    # check query coords
+    figure()
+    gcf().add_subplot(111, projection="3d")
+    plot([0], [0], [0], ".")
+    gca().scatter(
+        query_coords[j, :, 0],
+        query_coords[j, :, 1],
+        query_coords[j, :, 2],
+        s=1,
+        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)],
+    )
+    xlabel("x")
+    ylabel("y")

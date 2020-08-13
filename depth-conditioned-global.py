@@ -26,6 +26,15 @@ torch.backends.cudnn.benchmark = False
 np.random.seed(1)
 
 
+def positional_encoding(xyz, L):
+    encoding = []
+    for l in range(L):
+        encoding.append(np.sin(2 ** l ** np.pi * xyz))
+        encoding.append(np.cos(2 ** l ** np.pi * xyz))
+    encoding = np.concatenate(encoding, axis=-1)
+    return encoding
+
+
 class FCLayer(torch.nn.Module):
     def __init__(self, k_in, k_out=None, use_bn=True):
         super(FCLayer, self).__init__()
@@ -93,23 +102,28 @@ if config.wandb:
 
 model = torch.nn.ModuleDict(
     {
-        "mlp": torch.nn.Sequential(
-            FCLayer(67, 128),
+        "query_encoder": torch.nn.Sequential(
+            FCLayer(24, 32),
+            FCLayer(32, 128),
             FCLayer(128, 256),
             FCLayer(256, 512),
-            FCLayer(512),
-            FCLayer(512),
+            FCLayer(512, 1024),
+        ),
+        "mlp": torch.nn.Sequential(
+            FCLayer(1280 + 1024, 1024),
+            FCLayer(1024, 512),
             FCLayer(512, 256),
-            FCLayer(256, 64),
-            FCLayer(64, 16),
+            FCLayer(256, 128),
+            FCLayer(128, 64),
+            FCLayer(64, 32),
+            FCLayer(32, 16),
             torch.nn.Linear(16, 1),
         ),
-        # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
-        "cnn": unet.UNet(n_channels=3),
+        "cnn": torchvision.models.mobilenet_v2(pretrained=True).features,
     }
 ).cuda()
 
-# model.load_state_dict(torch.load("models/depth-cond-anchor-123129"))
+# model.load_state_dict(torch.load("models/depth-cond-global-87949"))
 model.train()
 
 if config.wandb:
@@ -169,28 +183,31 @@ for epoch in range(20):
         if len(query_coords) < config.img_batch_size:
             raise Exception("gah")
 
+        query_coords = torch.Tensor(positional_encoding(query_xyz.numpy(), L=4)).cuda()
+
         rgb_img_t = rgb_img_t.cuda()
-        query_coords = query_coords.cuda()
+        # query_coords = query_coords.cuda()
         query_occ = query_occ.float().cuda()
         query_uv_t = query_uv_t.cuda()
 
         optimizer.zero_grad()
 
-        img_feats = torch.relu(model["cnn"](rgb_img_t))
+        img_feats = torch.relu(model["cnn"](rgb_img_t)).mean([2, 3])
 
-        anchor_uv_t_t = (
-            anchor_uv_t
-            / torch.Tensor([rgb_img_t.shape[3], rgb_img_t.shape[2]])
-            * torch.Tensor([img_feats.shape[3], img_feats.shape[2]])
-        ).cuda()
+        query_coords = query_coords.reshape(
+            config.img_batch_size, config.n_anchors * config.n_queries_per_anchor, 24
+        )
+        query_occ = query_occ.reshape(
+            config.img_batch_size, config.n_anchors * config.n_queries_per_anchor
+        )
 
-        pixel_feats = []
-        for i in range(len(img_feats)):
-            pixel_feats.append(interp_img(img_feats[i], anchor_uv_t_t[i]).T)
-        pixel_feats = torch.stack(pixel_feats, dim=0).float()
-        pixel_feats = pixel_feats[:, :, None].repeat((1, 1, query_coords.shape[2], 1))
-
-        mlp_input = torch.cat((query_coords, pixel_feats), dim=-1)
+        mlp_input = torch.cat(
+            (
+                model["query_encoder"](query_coords),
+                img_feats[:, None].repeat(1, query_coords.shape[1], 1),
+            ),
+            dim=-1,
+        )
         logits = model["mlp"](mlp_input)[..., 0]
 
         preds = torch.sigmoid(logits)
@@ -237,30 +254,23 @@ for epoch in range(20):
                 step=step,
             )
 
-    name = "depth-cond-anchor-{}".format(step)
+    name = "depth-cond-global-{}".format(step)
     torch.save(model.state_dict(), os.path.join("models", name))
+
 
 """
 j = 0
-q = query_xyz_cam[j].cpu().numpy().reshape(-1, 3)
-pred_inds = preds.detach().cpu()[j].round().bool().flatten()
-gt_inds = query_occ.cpu()[j].round().bool().flatten()
+q = query_xyz_cam[j].cpu().numpy()
+pred_inds = preds.detach().cpu()[j].round().bool()
+gt_inds = query_occ.cpu()[j].round().bool()
 
-gcf().add_subplot(131, projection='3d')
+gcf().add_subplot(121, projection='3d')
 plot(q[pred_inds, 0], q[pred_inds, 1], q[pred_inds, 2], 'b.')
 plot(q[~pred_inds, 0], q[~pred_inds, 1], q[~pred_inds, 2], 'r.')
 plot([0], [0], [0], '.')
-title('pred occ')
 
-gcf().add_subplot(132, projection='3d')
+gcf().add_subplot(122, projection='3d')
 plot(q[gt_inds, 0], q[gt_inds, 1], q[gt_inds, 2], 'b.')
 plot(q[~gt_inds, 0], q[~gt_inds, 1], q[~gt_inds, 2], 'r.')
 plot([0], [0], [0], '.')
-title('gt occ')
-
-gcf().add_subplot(133, projection='3d')
-plot(q[gt_inds == pred_inds, 0], q[gt_inds == pred_inds, 1], q[gt_inds == pred_inds, 2], 'b.')
-plot(q[gt_inds != pred_inds, 0], q[gt_inds != pred_inds, 1], q[gt_inds != pred_inds, 2], 'r.')
-plot([0], [0], [0], '.')
-title('pred == gt')
 """

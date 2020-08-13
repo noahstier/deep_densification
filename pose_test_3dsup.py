@@ -198,7 +198,12 @@ query_encoder = torch.nn.Sequential(
 # )
 
 model = torch.nn.ModuleDict(
-    {"cnn": cnn, "pose_mlp": pose_mlp, "occ_mlp": occ_mlp, "query_encoder": query_encoder}
+    {
+        "cnn": cnn,
+        "pose_mlp": pose_mlp,
+        "occ_mlp": occ_mlp,
+        "query_encoder": query_encoder,
+    }
 ).cuda()
 if _wandb:
     wandb.watch(model)
@@ -242,7 +247,7 @@ for epoch in range(10):
         # mlp_input = torch.cat(
         #     (model['query_encoder'](query_pts_t), feats[:, None].repeat((1, query_pts.shape[1], 1))), dim=-1
         # )
-        mlp_input = model['query_encoder'](query_pts_t)
+        mlp_input = model["query_encoder"](query_pts_t)
         occ_logits = model["occ_mlp"](mlp_input)[..., 0]
 
         pos_loss = bce(occ_logits[query_occ.bool()], query_occ[query_occ.bool()])
@@ -263,7 +268,6 @@ for epoch in range(10):
         """
 
         opt.step()
-
 
         # pred_rot_inds = torch.argmax(preds, dim=-1).detach().cpu().numpy()
         # pred_rotmats = gt_rotmats[pred_rot_inds]
@@ -328,7 +332,7 @@ for epoch in range(10):
         gca().scatter(q[:, 0], q[:, 1], q[:, 2], alpha=1, c=query_colors, s=1)
         """
         if step % 101 == 0:
-            make a mesh for display
+            ...
 
         bin_edges = np.arange(preds.shape[1] + 1)
         if _wandb:
@@ -343,10 +347,9 @@ for epoch in range(10):
                         np_histogram=(torch.mean(preds, dim=0), bin_edges)
                     ),
                 },
-                step=step
+                step=step,
             )
         step += 1
-
 
 
 """
