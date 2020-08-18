@@ -14,9 +14,10 @@ import scipy.spatial
 import torch
 import torchvision
 import tqdm
-import unet
 import wandb
 
+import fpn
+import unet
 import config
 import depth_loader
 
@@ -91,6 +92,10 @@ def interp_img(img, xy):
 if config.wandb:
     wandb.init(project="deepmvs")
 
+input_height, input_width = fpn.transform(
+    PIL.Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
+).shape[1:]
+
 model = torch.nn.ModuleDict(
     {
         "mlp": torch.nn.Sequential(
@@ -105,7 +110,8 @@ model = torch.nn.ModuleDict(
             torch.nn.Linear(16, 1),
         ),
         # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
-        "cnn": unet.UNet(n_channels=3),
+        # "cnn": unet.UNet(n_channels=3),
+        "cnn": fpn.FPN(input_height, input_width, 1),
     }
 ).cuda()
 
@@ -124,8 +130,17 @@ house_dirs = sorted(
         and os.path.exists(os.path.join(d, "poses.npz"))
     ]
 )
+
+"""
+"""
+with open("w_chair.txt", "r") as f:
+    house_names_w_chair = set(f.read().split())
+house_dirs = [h for h in house_dirs if os.path.basename(h) in house_names_w_chair]
+"""
+"""
+
 test_house_dirs = house_dirs[:10]
-train_house_dirs = house_dirs[10:]
+train_house_dirs = house_dirs[10:20]
 dset = depth_loader.Dataset(
     train_house_dirs,
     n_anchors=config.n_anchors,
@@ -176,7 +191,10 @@ for epoch in range(20):
 
         optimizer.zero_grad()
 
-        img_feats = torch.relu(model["cnn"](rgb_img_t))
+        img_feats, _ = model["cnn"](rgb_img_t)
+        img_feats = torch.nn.functional.interpolate(
+            img_feats, size=(rgb_img_t.shape[2:]), mode="bilinear", align_corners=False
+        )
 
         anchor_uv_t_t = (
             anchor_uv_t

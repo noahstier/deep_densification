@@ -28,18 +28,22 @@ transform = torchvision.transforms.Compose(
 
 
 @numba.jit(nopython=True)
-def take_first_dists_below_thresh(a, b, n, thresh):
+def take_first_dists_below_thresh3(a, b, n, thresh):
     result = np.ones((a.shape[0], n), dtype=np.int32) * -1
     for i in range(a.shape[0]):
         k = 0
         a_val = a[i]
         for j in range(b.shape[0]):
             b_val = b[j]
-            dist = np.sum((a_val - b_val) ** 2) ** 0.5
+            dist = (
+                (a_val[0] - b_val[0]) ** 2
+                + (a_val[1] - b_val[1]) ** 2
+                + (a_val[2] - b_val[2]) ** 2
+            ) ** 0.5
             if dist < thresh:
                 result[i, k] = j
                 k += 1
-                if k > n:
+                if k == n:
                     break
     return result
 
@@ -68,6 +72,18 @@ class Dataset(torch.utils.data.Dataset):
             for img_ind, (rgb_imgfile, depth_imgfile) in enumerate(
                 zip(rgb_imgfiles, depth_imgfiles)
             ):
+                """
+                """
+                cat_imgfile = rgb_imgfile.replace("color", "category").replace(
+                    "jpg", "png"
+                )
+                if (
+                    np.sum(np.asarray(PIL.Image.open(cat_imgfile)) == 11)
+                    < self.n_anchors * 3
+                ):
+                    continue
+                """
+                """
                 self.images.append((house_dir, img_ind, rgb_imgfile, depth_imgfile))
 
     def __len__(self):
@@ -81,6 +97,10 @@ class Dataset(torch.utils.data.Dataset):
         sfm_ptfile = os.path.join(house_dir, "sfm/sparse/auto/points3D.bin")
 
         pose_npz = np.load(os.path.join(house_dir, "poses.npz"))
+
+        depth_img = (
+            cv2.imread(depth_imgfile, cv2.IMREAD_ANYDEPTH).astype(np.float32) / 1000
+        )
 
         depth_img = (
             cv2.imread(depth_imgfile, cv2.IMREAD_ANYDEPTH).astype(np.float32) / 1000
@@ -111,11 +131,29 @@ class Dataset(torch.utils.data.Dataset):
         inds = np.argwhere(inds).flatten()
         np.random.shuffle(inds)
 
+        """
+        """
+        cat_imgfile = rgb_imgfile.replace("color", "category").replace("jpg", "png")
+        cat_img = np.asarray(
+            PIL.Image.open(cat_imgfile).transpose(PIL.Image.FLIP_TOP_BOTTOM)
+        )
+        anchor_uv = anchor_uv_inds = np.argwhere(cat_img == 11)[:, [1, 0]]
+        __inds = np.random.choice(
+            np.arange(len(anchor_uv)), size=self.n_anchors * 3, replace=False
+        )
+        anchor_uv = anchor_uv[__inds]
+        anchor_uv_inds = anchor_uv_inds[__inds]
+
+        """
+        """
+
+        """
         # pick anchors at pixels where there is already a query point --
         # better chance that there will be enough query points around this anchor
         anchor_inds = np.random.choice(inds, size=self.n_anchors * 3, replace=False)
         anchor_uv = query_uv[anchor_inds]
         anchor_uv_inds = np.floor(anchor_uv).astype(int)
+        """
 
         query_xyz = query_xyz[inds]
         query_xyz_cam = query_xyz_cam[inds]
@@ -126,6 +164,13 @@ class Dataset(torch.utils.data.Dataset):
         anchor_xyz_cam = (
             np.linalg.inv(intrinsic) @ np.c_[anchor_uv, np.ones(len(anchor_uv))].T
         ).T * anchor_ranges[:, None]
+
+        """
+        a = anchor_xyz_cam
+        b = query_xyz_cam
+        n = self.n_queries_per_anchor
+        thresh = 0.2
+        """
 
         query_inds = take_first_dists_below_thresh(
             anchor_xyz_cam, query_xyz_cam, self.n_queries_per_anchor, 0.2
@@ -325,6 +370,16 @@ if __name__ == "__main__":
     house_dirs = sorted([d for d in glob.glob(os.path.join(config.dset_dir, "*"))])
 
     """
+    """
+    with open("w_chair.txt", "r") as f:
+        house_names_w_chair = set(f.read().split())
+    house_dirs = [
+        h for h in house_dirs[:10] if os.path.basename(h) in house_names_w_chair
+    ]
+    """
+    """
+
+    """
     house_dir = np.random.choice(house_dirs)
     npzfile = os.path.join(house_dir, 'fusion.npz')
     npz = np.load(npzfile)
@@ -374,7 +429,7 @@ if __name__ == "__main__":
     """
 
     dset = Dataset(house_dirs, n_anchors=16, n_queries_per_anchor=128)
-    index = 10000
+    index = 0
     self = dset
 
     (
