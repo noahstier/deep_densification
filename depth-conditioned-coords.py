@@ -58,6 +58,52 @@ class FCLayer(torch.nn.Module):
         return x
 
 
+def fc_bn_relu(in_c, out_c):
+    return torch.nn.Sequential(
+        torch.nn.Linear(in_c, out_c, bias=False),
+        torch.nn.BatchNorm1d(out_c),
+        torch.nn.ReLU(),
+    )
+
+
+class MLP(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.coord_encoder = torch.nn.Sequential(
+            fc_bn_relu(3, 16),
+            fc_bn_relu(16, 32),
+            fc_bn_relu(32, 64),
+            fc_bn_relu(64, 128),
+        )
+
+        self.offsetter = torch.nn.Sequential(
+            fc_bn_relu(256, 256),
+            fc_bn_relu(256, 256),
+            fc_bn_relu(256, 256),
+            fc_bn_relu(256, 256),
+            fc_bn_relu(256, 128),
+        )
+
+        self.classifier = torch.nn.Sequential(
+            fc_bn_relu(128, 128),
+            fc_bn_relu(128, 64),
+            fc_bn_relu(64, 32),
+            fc_bn_relu(32, 16),
+            torch.nn.Linear(16, 1, bias=False),
+        )
+
+    def forward(self, coords, feats):
+        shape = coords.shape[:-1]
+        coords = coords.reshape(np.prod([i for i in shape]), coords.shape[-1])
+        feats = feats.reshape(np.prod([i for i in shape]), feats.shape[-1])
+
+        encoded_coords = self.coord_encoder(coords)
+        offset = self.offsetter(torch.cat((encoded_coords, feats), dim=-1)) + feats
+        logits = self.classifier(offset)
+        logits = logits.reshape(*shape, -1)
+        return logits
+
+
 def interp_img(img, xy):
     x = xy[:, 0]
     y = xy[:, 1]
@@ -98,30 +144,31 @@ input_height, input_width = fpn.transform(
 
 model = torch.nn.ModuleDict(
     {
-        "query_encoder": torch.nn.Sequential(
-            FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
-        ),
-        "mlp": torch.nn.Sequential(
-            FCLayer(256),
-            FCLayer(256, 512),
-            FCLayer(512, 1024),
-            FCLayer(1024),
-            FCLayer(1024),
-            FCLayer(1024, 512),
-            FCLayer(512, 256),
-            FCLayer(256, 64),
-            FCLayer(64, 16),
-            torch.nn.Linear(16, 1),
-        ),
+        # "query_encoder": torch.nn.Sequential(
+        #     FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
+        # ),
+        # "mlp": torch.nn.Sequential(
+        #     FCLayer(256),
+        #     FCLayer(256, 512),
+        #     FCLayer(512, 1024),
+        #     FCLayer(1024),
+        #     FCLayer(1024),
+        #     FCLayer(1024, 512),
+        #     FCLayer(512, 256),
+        #     FCLayer(256, 64),
+        #     FCLayer(64, 16),
+        #     torch.nn.Linear(16, 1),
+        # ),
         # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
         # "cnn": unet.UNet(n_channels=3),
         "cnn": fpn.FPN(input_height, input_width, 1),
+        "mlp": MLP(),
     }
 ).cuda()
 
 optimizer = torch.optim.Adam(model.parameters())
 
-if True:
+if False:
     checkpoint = torch.load("models/5-class-128pt")
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["opt"])
@@ -219,12 +266,15 @@ for epoch in range(10_000):
         pixel_feats = torch.stack(pixel_feats, dim=0).float()
         pixel_feats = pixel_feats[:, :, None].repeat((1, 1, query_coords.shape[2], 1))
 
-        mlp_input = torch.cat(
-            (model["query_encoder"](query_coords), pixel_feats), dim=-1
-        )
-        logits = model["mlp"](mlp_input)[..., 0]
+        logits = model["mlp"](query_coords, pixel_feats)[..., 0]
 
         preds = torch.sigmoid(logits)
+
+        loss = occ_loss_fn(preds, query_occ)
+        loss = torch.mean(loss)
+
+        loss.backward()
+        optimizer.step()
 
         pos_inds = query_occ.bool()
         neg_inds = ~pos_inds
@@ -249,12 +299,10 @@ for epoch in range(10_000):
         # occ_loss = occ_loss_fn(preds, query_occ)
         # cat_loss = cat_loss_fn(cat_logits, cat_gt[visible_img_inds])
 
-        pos_loss = occ_loss_fn(preds[pos_inds], query_occ[pos_inds])
-        neg_loss = occ_loss_fn(preds[neg_inds], query_occ[neg_inds])
+        pos_loss = torch.mean(occ_loss_fn(preds[pos_inds], query_occ[pos_inds]))
+        neg_loss = torch.mean(occ_loss_fn(preds[neg_inds], query_occ[neg_inds]))
 
         # loss = pos_loss + neg_loss
-        loss = occ_loss_fn(preds, query_occ)
-        loss = torch.mean(loss)
 
         """
         i = 1
@@ -311,16 +359,13 @@ for epoch in range(10_000):
         o3d.visualization.draw_geometries([mesh, pcd])
         """
 
-        loss.backward()
-        optimizer.step()
-
         step += 1
         if config.wandb:
             wandb.log(
                 {
                     "pos loss": pos_loss.item(),
                     "neg loss": neg_loss.item(),
-                    # "loss": loss.item(),
+                    "loss": loss.item(),
                     # "cat_loss": cat_loss.item(),
                     "logits": wandb.Histogram(logits.detach().cpu().numpy()),
                     "preds": wandb.Histogram(preds.detach().cpu().numpy()),

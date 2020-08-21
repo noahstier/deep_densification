@@ -7,6 +7,7 @@ import numpy as np
 import PIL.Image
 import tqdm
 
+
 def work(tup):
     house_name, img_name, cat_imgfile = tup
     img_name = os.path.basename(cat_imgfile)
@@ -33,10 +34,10 @@ outq = list(tqdm.tqdm(pool.imap(work, q), total=len(q)))
 for house_name, img_name, d in outq:
     per_img_classes[house_name][img_name] = d
 
-with open('per_img_classes.pkl', 'wb') as f:
+with open("per_img_classes.pkl", "wb") as f:
     pickle.dump(per_img_classes, f)
 
-with open('per_img_classes.pkl', 'rb') as f:
+with open("per_img_classes.pkl", "rb") as f:
     per_img_classes = pickle.load(f)
 
 imgs_w_chair = []
@@ -51,8 +52,6 @@ for house_dir in tqdm.tqdm(house_dirs):
             imgs_w_chair.append(cat_imgfile)
 
 
-
-
 import glob
 import os
 import importlib
@@ -63,9 +62,7 @@ import PIL.Image
 import tqdm
 
 colmap_reader_script = "/home/noah/Documents/colmap/scripts/python/read_write_model.py"
-spec = importlib.util.spec_from_file_location(
-    "colmap_reader", colmap_reader_script
-)
+spec = importlib.util.spec_from_file_location("colmap_reader", colmap_reader_script)
 colmap_reader = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(colmap_reader)
 
@@ -75,6 +72,7 @@ for house_dir in house_dirs:
     house_name = os.path.basename(house_dir)
     imfile = os.path.join(house_dir, "sfm/sparse/auto/images.bin")
     q.append((house_dir, house_name, imfile))
+
 
 def work(tup):
     house_dir, house_name, imfile = tup
@@ -86,8 +84,12 @@ def work(tup):
         xys = im.xys[pt_inds]
         pt_ids = im.point3D_ids[pt_inds]
         uv_inds = np.floor(xys).astype(int)
-        cat_imgfile = os.path.join(house_dir, 'imgs/category', im.name.replace('jpg', 'png'))
-        cat_img = np.asarray(PIL.Image.open(cat_imgfile).transpose(PIL.Image.FLIP_TOP_BOTTOM))
+        cat_imgfile = os.path.join(
+            house_dir, "imgs/category", im.name.replace("jpg", "png")
+        )
+        cat_img = np.asarray(
+            PIL.Image.open(cat_imgfile).transpose(PIL.Image.FLIP_TOP_BOTTOM)
+        )
         cats = cat_img[uv_inds[:, 1], uv_inds[:, 0]]
 
         for (pt_id, cat) in zip(pt_ids, cats):
@@ -97,6 +99,7 @@ def work(tup):
 
     return house_name, d
 
+
 pool = mp.Pool(12)
 outq = list(tqdm.tqdm(pool.imap(work, q), total=len(q)))
 
@@ -104,5 +107,5 @@ pt_classes = {house_dir: d for (house_dir, d) in outq}
 
 for house_dir, d in tqdm.tqdm(pt_classes.items()):
     house_name = os.path.basename(house_dir)
-    with open('pt_classes/' + house_name + '.pkl', 'wb') as f:
+    with open("pt_classes/" + house_name + ".pkl", "wb") as f:
         pickle.dump(d, f)

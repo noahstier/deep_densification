@@ -56,17 +56,22 @@ class FPN(torch.nn.Module):
             ]
         )
 
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Conv2d(128, n_classes, 1, bias=False),
-            torch.nn.Upsample(
-                (input_height, input_width), mode="bilinear", align_corners=False
-            ),
+        self.refiner = torch.nn.Sequential(
+            conv_bn_relu(128, 128), conv_bn_relu(128, 128),
         )
+
+        # self.classifier = torch.nn.Sequential(
+        #     torch.nn.Conv2d(128, n_classes, 1, bias=False),
+        #     torch.nn.Upsample(
+        #         (input_height, input_width), mode="bilinear", align_corners=False
+        #     ),
+        # )
 
     def forward(self, imgs):
         fpn_features = self.fpn(imgs)
-        consolidated_feature = sum(
-            [self.scale_heads[i](fpn_features[i]) for i in range(4)]
+        consolidated_feature = self.refiner(
+            sum([self.scale_heads[i](fpn_features[i]) for i in range(4)])
         )
-        logits = self.classifier(consolidated_feature)
+        # logits = self.classifier(consolidated_feature)
+        logits = 0
         return consolidated_feature, logits

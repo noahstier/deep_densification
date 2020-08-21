@@ -21,10 +21,10 @@ import unet
 import config
 import depth_loader
 
-torch.manual_seed(0)
+torch.manual_seed(1)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-np.random.seed(0)
+np.random.seed(1)
 
 
 class FCLayer(torch.nn.Module):
@@ -89,6 +89,12 @@ def interp_img(img, xy):
     return interped
 
 
+def log_transform(x, shift=1):
+    """ rescales TSDF values to weight voxels near the surface more than close
+    to the truncation distance"""
+    return x.sign() * (1 + x.abs() / shift).log()
+
+
 if config.wandb:
     wandb.init(project="deepmvs")
 
@@ -121,10 +127,10 @@ model = torch.nn.ModuleDict(
 
 optimizer = torch.optim.Adam(model.parameters())
 
-if True:
-    checkpoint = torch.load("models/5-class-128pt")
+if False:
+    checkpoint = torch.load("models/5-class-wider")
     model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["opt"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
 
 
 if config.wandb:
@@ -165,7 +171,7 @@ loader = torch.utils.data.DataLoader(
     pin_memory=True,
 )
 
-occ_loss_fn = torch.nn.BCELoss(reduction="none").cuda()
+occ_loss_fn = torch.nn.BCELoss().cuda()
 
 step = -1
 for epoch in range(10_000):
@@ -198,7 +204,7 @@ for epoch in range(10_000):
         query_coords = query_coords.cuda()
         query_tsdf = query_tsdf.float().cuda()
         query_uv_t = query_uv_t.cuda()
-        query_occ = (query_tsdf <= 0).float()
+        query_occ = query_tsdf <= 0
 
         optimizer.zero_grad()
 
@@ -224,11 +230,18 @@ for epoch in range(10_000):
         )
         logits = model["mlp"](mlp_input)[..., 0]
 
-        preds = torch.sigmoid(logits)
+        preds = torch.tanh(logits)
+
+        loss = torch.nn.functional.l1_loss(
+            log_transform(preds), log_transform(query_tsdf)
+        )
+
+        loss.backward()
+        optimizer.step()
 
         pos_inds = query_occ.bool()
         neg_inds = ~pos_inds
-        true_pos = (preds > 0.5) & pos_inds
+        true_pos = (preds <= 0) & pos_inds
         acc = torch.sum(true_pos) / torch.sum(pos_inds).float()
         class_acc = {}
         for c in included_classes:
@@ -237,11 +250,11 @@ for epoch in range(10_000):
             if denom > 0:
                 class_acc[c] = torch.sum(true_pos[inds]) / denom
 
-        pos_acc = torch.sum((preds > 0.5) & pos_inds) / pos_inds.sum().float()
-        neg_acc = torch.sum((preds < 0.5) & neg_inds) / neg_inds.sum().float()
+        pos_acc = torch.sum((preds <= 0) & pos_inds) / pos_inds.sum().float()
+        neg_acc = torch.sum((preds > 0) & neg_inds) / neg_inds.sum().float()
 
-        true_pos = torch.sum((preds > 0.5) & pos_inds).float()
-        all_predicted_pos = torch.sum(preds > 0.5)
+        true_pos = torch.sum((preds <= 0) & pos_inds).float()
+        all_predicted_pos = torch.sum(preds <= 0)
         all_actual_pos = torch.sum(pos_inds)
         precision = true_pos / all_predicted_pos
         recall = true_pos / all_actual_pos
@@ -249,78 +262,18 @@ for epoch in range(10_000):
         # occ_loss = occ_loss_fn(preds, query_occ)
         # cat_loss = cat_loss_fn(cat_logits, cat_gt[visible_img_inds])
 
-        pos_loss = occ_loss_fn(preds[pos_inds], query_occ[pos_inds])
-        neg_loss = occ_loss_fn(preds[neg_inds], query_occ[neg_inds])
+        # pos_loss = occ_loss_fn(preds[pos_inds], query_occ[pos_inds])
+        # neg_loss = occ_loss_fn(preds[neg_inds], query_occ[neg_inds])
 
         # loss = pos_loss + neg_loss
-        loss = occ_loss_fn(preds, query_occ)
-        loss = torch.mean(loss)
-
-        """
-        i = 1
-        j = 3
-
-        x = y = z = np.arange(-1, 1, .2)
-        xx, yy, zz = np.meshgrid(x, y, z)
-        xyz = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
-        fake_query_coords = torch.Tensor(xyz).cuda()[None, None]
-
-
-        pixel_feat = pixel_feats[i, j, 0][None, None, None, :].repeat((1, 1, fake_query_coords.shape[2], 1))
-
-        mlp_input = torch.cat((model["query_encoder"](fake_query_coords), pixel_feat), dim=-1)
-        fake_logits = model["mlp"](mlp_input)[..., 0]
-        fake_preds = torch.sigmoid(fake_logits)
-
-        subplot(221)
-        imshow(rgb_img[i].numpy())
-        plot(anchor_uv[i, j, 0], anchor_uv[i, j, 1], '.')
-        axis('off')
-
-        gcf().add_subplot(222, projection='3d')
-        q = query_coords.cpu().numpy()
-        t = query_tsdf.cpu().numpy()
-        gca().scatter(q[i, j, :, 0], q[i, j, :, 1], q[i, j, :, 2], alpha=1, c=plt.cm.jet(1 - (t[i, j] * .5 + .5))[:, :3])
-        plot([0], [0], [0], 'k.', markersize=10)
-        xlabel('x')
-        ylabel('y')
-
-        gcf().add_subplot(223, projection='3d')
-        q = query_coords.cpu().numpy()
-        pr = preds.detach().cpu().numpy()
-        gca().scatter(q[i, j, :, 0], q[i, j, :, 1], q[i, j, :, 2], alpha=1, c=plt.cm.jet(pr[i, j])[:, :3])
-        plot([0], [0], [0], 'k.', markersize=10)
-        xlabel('x')
-        ylabel('y')
-
-        gcf().add_subplot(224, projection='3d')
-        q = fake_query_coords.cpu().numpy()
-        fpr = fake_preds.detach().cpu().numpy()
-        gca().scatter(q[0, 0, :, 0], q[0, 0, :, 1], q[0, 0, :, 2], alpha=1, c=plt.cm.jet(fpr[0, 0])[:, :3])
-        plot([0], [0], [0], 'k.', markersize=10)
-        xlabel('x')
-        ylabel('y')
-
-        verts, faces, _, _, = skimage.measure.marching_cubes(fpr[0, 0].reshape(xx.shape), level=0.5)
-        verts = verts[:, [1, 0, 2]]
-        verts = (verts - np.array(xx.shape) / 2) * .2
-        faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
-        mesh = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(verts), o3d.utility.Vector3iVector(faces))
-        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(q[0, 0]))
-        pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(fpr[0, 0])[:, :3])
-        o3d.visualization.draw_geometries([mesh, pcd])
-        """
-
-        loss.backward()
-        optimizer.step()
 
         step += 1
         if config.wandb:
             wandb.log(
                 {
-                    "pos loss": pos_loss.item(),
-                    "neg loss": neg_loss.item(),
-                    # "loss": loss.item(),
+                    # "pos loss": pos_loss.item(),
+                    # "neg loss": neg_loss.item(),
+                    "loss": loss.item(),
                     # "cat_loss": cat_loss.item(),
                     "logits": wandb.Histogram(logits.detach().cpu().numpy()),
                     "preds": wandb.Histogram(preds.detach().cpu().numpy()),

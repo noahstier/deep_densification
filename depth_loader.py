@@ -56,7 +56,14 @@ def positional_encoding(xyz, L):
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, house_dirs, per_img_classes, included_classes, n_anchors, n_queries_per_anchor):
+    def __init__(
+        self,
+        house_dirs,
+        per_img_classes,
+        included_classes,
+        n_anchors,
+        n_queries_per_anchor,
+    ):
         self.n_anchors = n_anchors
         self.n_queries_per_anchor = n_queries_per_anchor
         self.images = []
@@ -142,7 +149,8 @@ class Dataset(torch.utils.data.Dataset):
             PIL.Image.open(cat_imgfile).transpose(PIL.Image.FLIP_TOP_BOTTOM)
         )
         included_mask = np.sum([(cat_img == c) for c in self.included_classes], axis=0)
-        anchor_uv = anchor_uv_inds = np.argwhere(included_mask > 0)[:, [1, 0]]
+        anchor_uv_inds = np.argwhere(included_mask > 0)[:, [1, 0]]
+        anchor_uv = anchor_uv_inds + 0.5
         __inds = np.random.choice(
             np.arange(len(anchor_uv)), size=self.n_anchors * 3, replace=False
         )
@@ -237,7 +245,6 @@ class Dataset(torch.utils.data.Dataset):
         # query_coords = positional_encoding(
         #     (query_xyz_rotated - anchor_xyz_rotated[:, None]) / 0.2, L=1
         # )
-        query_occ = query_tsdf < 0
 
         pil_img = PIL.Image.open(rgb_imgfile)
         rgb_img = np.asarray(pil_img)
@@ -349,7 +356,7 @@ class Dataset(torch.utils.data.Dataset):
 
         return (
             query_coords.astype(np.float32),
-            query_occ,
+            query_tsdf,
             query_uv,
             query_uv_t,
             query_xyz,
@@ -376,16 +383,6 @@ if __name__ == "__main__":
     spec.loader.exec_module(colmap_reader)
 
     house_dirs = sorted([d for d in glob.glob(os.path.join(config.dset_dir, "*"))])
-
-    """
-    """
-    with open("w_chair.txt", "r") as f:
-        house_names_w_chair = set(f.read().split())
-    house_dirs = [
-        h for h in house_dirs[:10] if os.path.basename(h) in house_names_w_chair
-    ]
-    """
-    """
 
     """
     house_dir = np.random.choice(house_dirs)
@@ -439,13 +436,19 @@ if __name__ == "__main__":
     with open("per_img_classes.pkl", "rb") as f:
         per_img_classes = pickle.load(f)
 
-    dset = Dataset(house_dirs, per_img_classes, included_classes=[5, 11, 20, 67, 72], n_anchors=16, n_queries_per_anchor=128)
+    dset = Dataset(
+        house_dirs,
+        per_img_classes,
+        included_classes=[5, 11, 20, 67, 72],
+        n_anchors=16,
+        n_queries_per_anchor=128,
+    )
     index = np.random.randint(len(dset))
     self = dset
 
     (
         query_coords,
-        query_occ,
+        query_tsdf,
         query_uv,
         query_uv_t,
         query_xyz,
@@ -491,7 +494,7 @@ if __name__ == "__main__":
     j = 0
     subplot(131)
     imshow(rgb_img)
-    title('class = {}'.format(anchor_classes[j]))
+    title("class = {}".format(anchor_classes[j]))
     scatter(
         query_uv[j, :, 0],
         query_uv[j, :, 1],
@@ -513,7 +516,7 @@ if __name__ == "__main__":
         query_xyz[j, :, 1],
         query_xyz[j, :, 2],
         s=1,
-        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)],
+        c=plt.cm.jet(query_tsdf[j] * 0.5 + 0.5)[:, :3],
     )
     plot([extrinsic[0, 3]], [extrinsic[1, 3]], [extrinsic[2, 3]], "g.")
 
@@ -530,7 +533,7 @@ if __name__ == "__main__":
         query_xyz_cam[j, :, 1],
         query_xyz_cam[j, :, 2],
         s=1,
-        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)],
+        c=plt.cm.jet(query_tsdf[j] * 0.5 + 0.5)[:, :3],
     )
     plot([0], [0], [0], "g.")
     xlabel("x")
@@ -574,7 +577,6 @@ if __name__ == "__main__":
     )
     xlabel("x")
     ylabel("y")
-
 
     gca().scatter(
         query_coords[j, :, 0],

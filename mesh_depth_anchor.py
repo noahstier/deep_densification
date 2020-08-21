@@ -117,7 +117,7 @@ train_house_dirs = house_dirs[10:]
 
 included_classes = [5, 11, 20, 67, 72]
 # included_classes = [67]
-'''
+"""
 with open("per_img_classes.pkl", "rb") as f:
     per_img_classes = pickle.load(f)
 tups = []
@@ -129,7 +129,7 @@ for house_dir, b in a.items():
             tups.append((os.path.basename(house_dir), img_name, n))
 
 tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
-'''
+"""
 
 house_dir = test_house_dirs[-2]
 img_ind = 424
@@ -170,19 +170,27 @@ imheight, imwidth, _ = imgs[0].shape
 
 cat_imgs = np.stack(
     [
-        PIL.Image.open(os.path.join(cat_imgdir, ims[im_id].name.replace('jpg', 'png'))).transpose(PIL.Image.FLIP_TOP_BOTTOM)
+        PIL.Image.open(
+            os.path.join(cat_imgdir, ims[im_id].name.replace("jpg", "png"))
+        ).transpose(PIL.Image.FLIP_TOP_BOTTOM)
         for im_id in im_ids
     ],
     axis=0,
 )
 
-depth_imgs = np.stack(
-    [
-        cv2.imread(os.path.join(depth_imgdir, ims[im_id].name.replace('jpg', 'png')), cv2.IMREAD_ANYDEPTH)
-        for im_id in im_ids
-    ],
-    axis=0,
-).astype(np.float32) / 1000
+depth_imgs = (
+    np.stack(
+        [
+            cv2.imread(
+                os.path.join(depth_imgdir, ims[im_id].name.replace("jpg", "png")),
+                cv2.IMREAD_ANYDEPTH,
+            )
+            for im_id in im_ids
+        ],
+        axis=0,
+    ).astype(np.float32)
+    / 1000
+)
 
 
 input_height = imgs_t.shape[2]
@@ -191,23 +199,19 @@ input_width = imgs_t.shape[3]
 model = torch.nn.ModuleDict(
     {
         "query_encoder": torch.nn.Sequential(
-            FCLayer(3, 64),
-            FCLayer(64),
-            FCLayer(64),
-            FCLayer(64, 128),
-
+            FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
         ),
-         #"mlp": torch.nn.Sequential(
-         #    FCLayer(67, 128),
-         #    FCLayer(128, 256),
-         #    FCLayer(256, 512),
-         #    FCLayer(512),
-         #    FCLayer(512),
-         #    FCLayer(512, 256),
-         #    FCLayer(256, 64),
-         #    FCLayer(64, 16),
-         #    torch.nn.Linear(16, 1),
-         #),
+        # "mlp": torch.nn.Sequential(
+        #    FCLayer(67, 128),
+        #    FCLayer(128, 256),
+        #    FCLayer(256, 512),
+        #    FCLayer(512),
+        #    FCLayer(512),
+        #    FCLayer(512, 256),
+        #    FCLayer(256, 64),
+        #    FCLayer(64, 16),
+        #    torch.nn.Linear(16, 1),
+        # ),
         "mlp": torch.nn.Sequential(
             FCLayer(256),
             FCLayer(256, 512),
@@ -226,7 +230,7 @@ model = torch.nn.ModuleDict(
     }
 )
 # model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/5-class-wider")['model'])
+model.load_state_dict(torch.load("models/5-class-wider")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -339,7 +343,7 @@ for i in tqdm.trange(int(np.ceil(len(anchor_uv) / anchors_per_batch))):
 
     mlp_input = torch.cat(
         (
-            model['query_encoder'](query_coords[None, start:end]),
+            model["query_encoder"](query_coords[None, start:end]),
             pixel_feats[None, start:end, None].repeat(1, 1, query_coords.shape[1], 1),
         ),
         dim=-1,
