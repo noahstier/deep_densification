@@ -39,7 +39,7 @@ class FCLayer(torch.nn.Module):
 
         self.use_bn = use_bn
 
-        self.fc = torch.nn.Linear(k_in, k_out)
+        self.fc = torch.nn.Linear(k_in, k_out, bias=not use_bn)
         if self.use_bn:
             self.bn = torch.nn.BatchNorm1d(k_out)
 
@@ -98,12 +98,20 @@ input_height, input_width = fpn.transform(
 
 model = torch.nn.ModuleDict(
     {
+        "query_encoder": torch.nn.Sequential(
+            FCLayer(3, 64),
+            FCLayer(64),
+            FCLayer(64),
+            FCLayer(64, 128),
+
+        ),
         "mlp": torch.nn.Sequential(
-            FCLayer(67, 128),
-            FCLayer(128, 256),
+            FCLayer(256),
             FCLayer(256, 512),
-            FCLayer(512),
-            FCLayer(512),
+            FCLayer(512, 1024),
+            FCLayer(1024),
+            FCLayer(1024),
+            FCLayer(1024, 512),
             FCLayer(512, 256),
             FCLayer(256, 64),
             FCLayer(64, 16),
@@ -115,13 +123,17 @@ model = torch.nn.ModuleDict(
     }
 ).cuda()
 
-# model.load_state_dict(torch.load("models/depth-cond-anchor-123129"))
-model.train()
+optimizer = torch.optim.Adam(model.parameters())
+
+if False:
+    checkpoint = torch.load("models/depth-cond-anchor-123129")
+    model.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+
 
 if config.wandb:
     wandb.watch(model)
 
-print("gathering house dirs")
 house_dirs = sorted(
     [
         d
@@ -133,16 +145,18 @@ house_dirs = sorted(
 
 """
 """
-with open("w_chair.txt", "r") as f:
-    house_names_w_chair = set(f.read().split())
-house_dirs = [h for h in house_dirs if os.path.basename(h) in house_names_w_chair]
+with open("per_img_classes.pkl", "rb") as f:
+    per_img_classes = pickle.load(f)
 """
 """
 
+included_classes = [5, 11, 20, 67, 72]
 test_house_dirs = house_dirs[:10]
-train_house_dirs = house_dirs[10:20]
+train_house_dirs = house_dirs[10:]
 dset = depth_loader.Dataset(
     train_house_dirs,
+    per_img_classes,
+    included_classes,
     n_anchors=config.n_anchors,
     n_queries_per_anchor=config.n_queries_per_anchor,
 )
@@ -155,14 +169,13 @@ loader = torch.utils.data.DataLoader(
     pin_memory=True,
 )
 
-optimizer = torch.optim.Adam(model.parameters())
-
 occ_loss_fn = torch.nn.BCELoss().cuda()
 
 step = -1
-for epoch in range(20):
+for epoch in range(10_000):
     print("epoch {}".format(epoch))
 
+    model.train()
     for batch in tqdm.tqdm(loader):
         (
             query_coords,
@@ -174,6 +187,7 @@ for epoch in range(20):
             anchor_uv,
             anchor_uv_t,
             anchor_xyz_cam,
+            anchor_classes,
             rgb_img_t,
             rgb_img,
             depth_img,
@@ -208,13 +222,22 @@ for epoch in range(20):
         pixel_feats = torch.stack(pixel_feats, dim=0).float()
         pixel_feats = pixel_feats[:, :, None].repeat((1, 1, query_coords.shape[2], 1))
 
-        mlp_input = torch.cat((query_coords, pixel_feats), dim=-1)
+        mlp_input = torch.cat((model['query_encoder'](query_coords), pixel_feats), dim=-1)
         logits = model["mlp"](mlp_input)[..., 0]
 
         preds = torch.sigmoid(logits)
 
         pos_inds = query_occ.bool()
         neg_inds = ~pos_inds
+        true_pos = (preds > 0.5) & pos_inds
+        acc = torch.sum(true_pos) / torch.sum(pos_inds).float()
+        class_acc = {}
+        for c in included_classes:
+            inds = anchor_classes == c
+            denom = torch.sum(pos_inds[inds]).float()
+            if denom > 0:
+                class_acc[c] = torch.sum(true_pos[inds]) / denom
+
         pos_acc = torch.sum((preds > 0.5) & pos_inds) / pos_inds.sum().float()
         neg_acc = torch.sum((preds < 0.5) & neg_inds) / neg_inds.sum().float()
 
@@ -251,12 +274,16 @@ for epoch in range(20):
                     "neg_acc": neg_acc.item(),
                     "precision": precision.item(),
                     "recall": recall.item(),
+                    **{'class acc {}'.format(str(k)): v.item() for k, v in class_acc.items()}
                 },
                 step=step,
             )
 
     name = "depth-cond-anchor-{}".format(step)
-    torch.save(model.state_dict(), os.path.join("models", name))
+    torch.save({
+        'model': model.state_dict(),
+        'opt': optimizer.state_dict()
+    }, os.path.join("models", name))
 
 """
 j = 0
@@ -282,3 +309,5 @@ plot(q[gt_inds != pred_inds, 0], q[gt_inds != pred_inds, 1], q[gt_inds != pred_i
 plot([0], [0], [0], '.')
 title('pred == gt')
 """
+
+

@@ -9,6 +9,7 @@ import cv2
 import imageio
 import numpy as np
 import open3d as o3d
+import pickle
 import PIL.Image
 import scipy.spatial
 import scipy.ndimage
@@ -47,7 +48,7 @@ class FCLayer(torch.nn.Module):
 
         self.use_bn = use_bn
 
-        self.fc = torch.nn.Linear(k_in, k_out)
+        self.fc = torch.nn.Linear(k_in, k_out, bias=not use_bn)
         if self.use_bn:
             self.bn = torch.nn.BatchNorm1d(k_out)
 
@@ -114,7 +115,24 @@ house_dirs = sorted(
 test_house_dirs = house_dirs[:10]
 train_house_dirs = house_dirs[10:]
 
-house_dir = test_house_dirs[2]
+included_classes = [5, 11, 20, 67, 72]
+# included_classes = [67]
+'''
+with open("per_img_classes.pkl", "rb") as f:
+    per_img_classes = pickle.load(f)
+tups = []
+a = {h: per_img_classes[os.path.basename(h)] for h in test_house_dirs}
+for house_dir, b in a.items():
+    for img_name, d in b.items():
+        n = np.sum([c in d for c in included_classes])
+        if n >= 3:
+            tups.append((os.path.basename(house_dir), img_name, n))
+
+tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
+'''
+
+house_dir = test_house_dirs[-2]
+img_ind = 424
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
@@ -122,14 +140,6 @@ cat_imgdir = os.path.join(house_dir, "imgs/category")
 fusion_npz = np.load(os.path.join(house_dir, "fusion.npz"))
 sfm_imfile = os.path.join(house_dir, "sfm/sparse/auto/images.bin")
 sfm_ptfile = os.path.join(house_dir, "sfm/sparse/auto/points3D.bin")
-
-cat_imgs = np.stack(
-    [
-        PIL.Image.open(f).transpose(PIL.Image.FLIP_TOP_BOTTOM)
-        for f in sorted(glob.glob(os.path.join(cat_imgdir, "*.png")))
-    ],
-    axis=0,
-)
 
 ims = colmap_reader.read_images_binary(sfm_imfile)
 pts = colmap_reader.read_points3d_binary(sfm_ptfile)
@@ -158,25 +168,53 @@ imgs = np.stack([np.asarray(img) for img in pil_imgs], axis=0)
 imgs_t = torch.stack([transform(img) for img in pil_imgs], dim=0).cuda()
 imheight, imwidth, _ = imgs[0].shape
 
+cat_imgs = np.stack(
+    [
+        PIL.Image.open(os.path.join(cat_imgdir, ims[im_id].name.replace('jpg', 'png'))).transpose(PIL.Image.FLIP_TOP_BOTTOM)
+        for im_id in im_ids
+    ],
+    axis=0,
+)
+
+depth_imgs = np.stack(
+    [
+        cv2.imread(os.path.join(depth_imgdir, ims[im_id].name.replace('jpg', 'png')), cv2.IMREAD_ANYDEPTH)
+        for im_id in im_ids
+    ],
+    axis=0,
+).astype(np.float32) / 1000
+
+
 input_height = imgs_t.shape[2]
 input_width = imgs_t.shape[3]
 
-depthfiles = sorted(glob.glob(os.path.join(depth_imgdir, "*.png")))
-depth_imgs = (
-    np.stack([cv2.imread(f, cv2.IMREAD_ANYDEPTH) for f in depthfiles], axis=0).astype(
-        np.float32
-    )
-    / 1000
-)
-
 model = torch.nn.ModuleDict(
     {
+        "query_encoder": torch.nn.Sequential(
+            FCLayer(3, 64),
+            FCLayer(64),
+            FCLayer(64),
+            FCLayer(64, 128),
+
+        ),
+         #"mlp": torch.nn.Sequential(
+         #    FCLayer(67, 128),
+         #    FCLayer(128, 256),
+         #    FCLayer(256, 512),
+         #    FCLayer(512),
+         #    FCLayer(512),
+         #    FCLayer(512, 256),
+         #    FCLayer(256, 64),
+         #    FCLayer(64, 16),
+         #    torch.nn.Linear(16, 1),
+         #),
         "mlp": torch.nn.Sequential(
-            FCLayer(67, 128),
-            FCLayer(128, 256),
+            FCLayer(256),
             FCLayer(256, 512),
-            FCLayer(512),
-            FCLayer(512),
+            FCLayer(512, 1024),
+            FCLayer(1024),
+            FCLayer(1024),
+            FCLayer(1024, 512),
             FCLayer(512, 256),
             FCLayer(256, 64),
             FCLayer(64, 16),
@@ -187,13 +225,13 @@ model = torch.nn.ModuleDict(
         "cnn": fpn.FPN(input_height, input_width, 1),
     }
 )
-model.load_state_dict(torch.load("models/depth-cond-anchor-25649"))
+# model.load_state_dict(torch.load("models/sofa-only")['model'])
+model.load_state_dict(torch.load("models/5-class-wider")['model'])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
 
 cnn = model["cnn"]
-featheight, featwidth = cnn(imgs_t[:1])[1].shape[2:]
 
 intr_file = os.path.join(house_dir, "camera_intrinsics")
 camera_intrinsic = np.loadtxt(intr_file)[0].reshape(3, 3)
@@ -206,8 +244,6 @@ for i, im_id in enumerate(im_ids):
     camera_extrinsics[i] = np.array(
         [[*r[0], t[0]], [*r[1], t[1]], [*r[2], t[2]], [0, 0, 0, 1]]
     )
-
-img_ind = 0
 
 res = 0.02
 x = np.arange(-0.2, 0.2, res)
@@ -227,7 +263,8 @@ uu, vv = np.meshgrid(
     np.arange(50, depth_img.shape[1], 40), np.arange(50, depth_img.shape[0], 40)
 )
 # anchor_uv = np.c_[uu.flatten(), vv.flatten()]
-anchor_uv = np.argwhere(cat_imgs[img_ind] == 11)[:, [1, 0]]
+included_mask = np.sum([(cat_imgs[img_ind] == c) for c in included_classes], axis=0)
+anchor_uv = np.argwhere(included_mask > 0)[:, [1, 0]]
 anchor_uv = anchor_uv[
     np.random.choice(np.arange(len(anchor_uv)), size=20, replace=False)
 ]
@@ -302,7 +339,7 @@ for i in tqdm.trange(int(np.ceil(len(anchor_uv) / anchors_per_batch))):
 
     mlp_input = torch.cat(
         (
-            query_coords[None, start:end],
+            model['query_encoder'](query_coords[None, start:end]),
             pixel_feats[None, start:end, None].repeat(1, 1, query_coords.shape[1], 1),
         ),
         dim=-1,
@@ -319,6 +356,9 @@ j = 4
 imshow(imgs[img_ind])
 plot(anchor_uv[j, 0], anchor_uv[j, 1], 'r.')
 plot(query_uv[j, :, 0], query_uv[j, :, 1], 'b.', markersize=1)
+
+imshow(imgs[img_ind])
+plot(anchor_uv[:, 0], anchor_uv[:, 1], 'r.')
 
 j = 4
 verts, faces, _, _, = skimage.measure.marching_cubes(pred_vols[j], level=0.5)
@@ -408,7 +448,9 @@ cam_pcd.paint_uniform_color(np.array([1, 0, 0], dtype=np.float64))
 
 # mesh = sum(meshes[::2])
 anchor_inds = np.arange(len(meshes))
-anchor_inds = np.random.choice(anchor_inds, size=3, replace=False)
+anchor_inds = np.random.choice(anchor_inds, size=10, replace=False)
+# anchor_inds = np.array([ 4,  7,  3, 15,  2])
+
 mesh = sum([meshes[i] for i in anchor_inds])
 
 anchor_spheres = sum(

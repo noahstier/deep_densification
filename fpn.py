@@ -34,30 +34,30 @@ class FPN(torch.nn.Module):
 
         self.scale_heads = torch.nn.ModuleList(
             [
-                conv_bn_relu(256, 64),
+                conv_bn_relu(256, 128),
                 torch.nn.Sequential(
-                    conv_bn_relu(256, 64),
+                    conv_bn_relu(256, 128),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
                 ),
                 torch.nn.Sequential(
-                    conv_bn_relu(256, 64),
+                    conv_bn_relu(256, 128),
                     torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
-                    conv_bn_relu(64, 64),
+                    conv_bn_relu(128, 128),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
                 ),
                 torch.nn.Sequential(
-                    conv_bn_relu(256, 64),
+                    conv_bn_relu(256, 128),
                     torch.nn.Upsample(dims[2], mode="bilinear", align_corners=False),
-                    conv_bn_relu(64, 64),
+                    conv_bn_relu(128, 128),
                     torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
-                    conv_bn_relu(64, 64),
+                    conv_bn_relu(128, 128),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
                 ),
             ]
         )
 
         self.classifier = torch.nn.Sequential(
-            torch.nn.Conv2d(64, n_classes, 1, bias=False),
+            torch.nn.Conv2d(128, n_classes, 1, bias=False),
             torch.nn.Upsample(
                 (input_height, input_width), mode="bilinear", align_corners=False
             ),

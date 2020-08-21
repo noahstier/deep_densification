@@ -1,5 +1,6 @@
 import glob
 import os
+import pickle
 
 import config
 
@@ -13,9 +14,6 @@ import torch
 import torchvision
 import tqdm
 
-imwidth = 640
-imheight = 480
-
 transform = torchvision.transforms.Compose(
     [
         torchvision.transforms.Resize(224),
@@ -28,7 +26,7 @@ transform = torchvision.transforms.Compose(
 
 
 @numba.jit(nopython=True)
-def take_first_dists_below_thresh3(a, b, n, thresh):
+def take_first_dists_below_thresh(a, b, n, thresh):
     result = np.ones((a.shape[0], n), dtype=np.int32) * -1
     for i in range(a.shape[0]):
         k = 0
@@ -58,10 +56,11 @@ def positional_encoding(xyz, L):
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, house_dirs, n_anchors, n_queries_per_anchor):
+    def __init__(self, house_dirs, per_img_classes, included_classes, n_anchors, n_queries_per_anchor):
         self.n_anchors = n_anchors
         self.n_queries_per_anchor = n_queries_per_anchor
         self.images = []
+        self.included_classes = included_classes
 
         print("initializing dataset")
         for house_dir in tqdm.tqdm(house_dirs):
@@ -69,21 +68,28 @@ class Dataset(torch.utils.data.Dataset):
             depth_imgdir = os.path.join(house_dir, "imgs/depth")
             rgb_imgfiles = sorted(glob.glob(os.path.join(rgb_imgdir, "*")))
             depth_imgfiles = sorted(glob.glob(os.path.join(depth_imgdir, "*")))
+            house_name = os.path.basename(house_dir)
             for img_ind, (rgb_imgfile, depth_imgfile) in enumerate(
                 zip(rgb_imgfiles, depth_imgfiles)
             ):
+                # there is a bug where the first depth image in each sequence is wrong
+                if img_ind == 0:
+                    continue
+
                 """
                 """
-                cat_imgfile = rgb_imgfile.replace("color", "category").replace(
-                    "jpg", "png"
-                )
-                if (
-                    np.sum(np.asarray(PIL.Image.open(cat_imgfile)) == 11)
-                    < self.n_anchors * 3
-                ):
+                if img_ind % 5 != 0:
                     continue
                 """
                 """
+                img_name = os.path.basename(depth_imgfile)
+                class_counts = per_img_classes[house_name][img_name]
+                for c in self.included_classes:
+                    if c in class_counts and class_counts[c] >= (self.n_anchors * 3):
+                        break
+                else:
+                    continue
+
                 self.images.append((house_dir, img_ind, rgb_imgfile, depth_imgfile))
 
     def __len__(self):
@@ -101,10 +107,7 @@ class Dataset(torch.utils.data.Dataset):
         depth_img = (
             cv2.imread(depth_imgfile, cv2.IMREAD_ANYDEPTH).astype(np.float32) / 1000
         )
-
-        depth_img = (
-            cv2.imread(depth_imgfile, cv2.IMREAD_ANYDEPTH).astype(np.float32) / 1000
-        )
+        imheight, imwidth = depth_img.shape
 
         intrinsic = pose_npz["intrinsic"]
         extrinsic = pose_npz["extrinsics"][img_ind]
@@ -120,15 +123,16 @@ class Dataset(torch.utils.data.Dataset):
 
         # narrow down query points to within frustum, and shuffle them
 
-        inds = (
-            (query_xyz_cam[:, 2] > 0)
-            & (query_uv[:, 0] >= 0)
-            & (query_uv[:, 1] >= 0)
-            & (query_uv[:, 0] < imwidth)
-            & (query_uv[:, 1] < imheight)
-        )
+        # inds = (
+        #     (query_xyz_cam[:, 2] > 0)
+        #     & (query_uv[:, 0] >= -20)
+        #     & (query_uv[:, 1] >= -20)
+        #     & (query_uv[:, 0] < imwidth + 20)
+        #     & (query_uv[:, 1] < imheight + 20)
+        # )
 
-        inds = np.argwhere(inds).flatten()
+        # inds = np.argwhere(inds).flatten()
+        inds = np.arange(len(query_xyz_cam))
         np.random.shuffle(inds)
 
         """
@@ -137,7 +141,8 @@ class Dataset(torch.utils.data.Dataset):
         cat_img = np.asarray(
             PIL.Image.open(cat_imgfile).transpose(PIL.Image.FLIP_TOP_BOTTOM)
         )
-        anchor_uv = anchor_uv_inds = np.argwhere(cat_img == 11)[:, [1, 0]]
+        included_mask = np.sum([(cat_img == c) for c in self.included_classes], axis=0)
+        anchor_uv = anchor_uv_inds = np.argwhere(included_mask > 0)[:, [1, 0]]
         __inds = np.random.choice(
             np.arange(len(anchor_uv)), size=self.n_anchors * 3, replace=False
         )
@@ -160,6 +165,7 @@ class Dataset(torch.utils.data.Dataset):
         query_uv = query_uv[inds]
         query_tsdf = query_tsdf[inds]
 
+        anchor_classes = cat_img[anchor_uv_inds[:, 1], anchor_uv_inds[:, 0]]
         anchor_ranges = depth_img[anchor_uv_inds[:, 1], anchor_uv_inds[:, 0]]
         anchor_xyz_cam = (
             np.linalg.inv(intrinsic) @ np.c_[anchor_uv, np.ones(len(anchor_uv))].T
@@ -186,6 +192,7 @@ class Dataset(torch.utils.data.Dataset):
 
         anchor_uv = anchor_uv[selected_anchor_inds]
         anchor_ranges = anchor_ranges[selected_anchor_inds]
+        anchor_classes = anchor_classes[selected_anchor_inds]
         anchor_xyz_cam = anchor_xyz_cam[selected_anchor_inds]
         query_inds = query_inds[selected_anchor_inds]
 
@@ -350,6 +357,7 @@ class Dataset(torch.utils.data.Dataset):
             anchor_uv,
             anchor_uv_t,
             anchor_xyz_cam,
+            anchor_classes,
             rgb_img_t,
             rgb_img,
             depth_img,
@@ -428,8 +436,11 @@ if __name__ == "__main__":
     o3d.visualization.draw_geometries([query_pcd, reproj_pcd, gt_pcd, bounds_pcd])
     """
 
-    dset = Dataset(house_dirs, n_anchors=16, n_queries_per_anchor=128)
-    index = 0
+    with open("per_img_classes.pkl", "rb") as f:
+        per_img_classes = pickle.load(f)
+
+    dset = Dataset(house_dirs, per_img_classes, included_classes=[5, 11, 20, 67, 72], n_anchors=16, n_queries_per_anchor=128)
+    index = np.random.randint(len(dset))
     self = dset
 
     (
@@ -442,6 +453,7 @@ if __name__ == "__main__":
         anchor_uv,
         anchor_uv_t,
         anchor_xyz_cam,
+        anchor_classes,
         rgb_img_t,
         rgb_img,
         depth_img,
@@ -467,6 +479,7 @@ if __name__ == "__main__":
     ).T[:, :3]
     sfm_uv = (intrinsic @ sfm_xyz_cam.T).T
     sfm_uv = sfm_uv[:, :2] / sfm_uv[:, 2:]
+    imheight, imwidth = depth_img.shape
     inds = (
         (sfm_xyz_cam[:, 2] > 0)
         & (sfm_uv[:, 0] >= 0)
@@ -478,6 +491,7 @@ if __name__ == "__main__":
     j = 0
     subplot(131)
     imshow(rgb_img)
+    title('class = {}'.format(anchor_classes[j]))
     scatter(
         query_uv[j, :, 0],
         query_uv[j, :, 1],
@@ -560,3 +574,12 @@ if __name__ == "__main__":
     )
     xlabel("x")
     ylabel("y")
+
+
+    gca().scatter(
+        query_coords[j, :, 0],
+        query_coords[j, :, 1],
+        query_coords[j, :, 2],
+        s=10,
+        c=np.array([[1, 0, 0], [0, 0, 1]])[query_occ[j].astype(int)],
+    )
