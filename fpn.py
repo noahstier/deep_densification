@@ -14,9 +14,9 @@ transform = torchvision.transforms.Compose(
 
 def conv_bn_relu(in_channels, out_channels):
     return torch.nn.Sequential(
-        torch.nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
-        torch.nn.BatchNorm2d(out_channels),
+        torch.nn.BatchNorm2d(in_channels),
         torch.nn.ReLU(),
+        torch.nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
     )
 
 

@@ -60,9 +60,9 @@ class FCLayer(torch.nn.Module):
 
 def fc_bn_relu(in_c, out_c):
     return torch.nn.Sequential(
-        torch.nn.Linear(in_c, out_c, bias=False),
-        torch.nn.BatchNorm1d(out_c),
+        torch.nn.BatchNorm1d(in_c),
         torch.nn.ReLU(),
+        torch.nn.Linear(in_c, out_c, bias=False),
     )
 
 
@@ -70,18 +70,18 @@ class MLP(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.coord_encoder = torch.nn.Sequential(
-            fc_bn_relu(3, 16),
-            fc_bn_relu(16, 32),
+            torch.nn.Linear(3, 32),
+            fc_bn_relu(32, 32),
             fc_bn_relu(32, 64),
             fc_bn_relu(64, 128),
         )
 
         self.offsetter = torch.nn.Sequential(
             fc_bn_relu(256, 256),
-            fc_bn_relu(256, 256),
-            fc_bn_relu(256, 256),
-            fc_bn_relu(256, 256),
             fc_bn_relu(256, 128),
+            fc_bn_relu(128, 128),
+            fc_bn_relu(128, 128),
+            fc_bn_relu(128, 128),
         )
 
         self.classifier = torch.nn.Sequential(
@@ -144,6 +144,8 @@ input_height, input_width = fpn.transform(
 
 model = torch.nn.ModuleDict(
     {
+        "cnn": fpn.FPN(input_height, input_width, 1),
+        "mlp": MLP(),
         # "query_encoder": torch.nn.Sequential(
         #     FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
         # ),
@@ -161,8 +163,6 @@ model = torch.nn.ModuleDict(
         # ),
         # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
         # "cnn": unet.UNet(n_channels=3),
-        "cnn": fpn.FPN(input_height, input_width, 1),
-        "mlp": MLP(),
     }
 ).cuda()
 
