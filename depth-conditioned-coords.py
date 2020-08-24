@@ -26,6 +26,12 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 np.random.seed(0)
 
+def focal_loss(inputs, targets, gamma):
+    pt = (inputs * targets) + (1 - inputs) * (1 - targets)
+    loss = - (1 - pt) ** gamma * torch.log(pt)
+    return loss
+
+
 
 class FCLayer(torch.nn.Module):
     def __init__(self, k_in, k_out=None, use_bn=True):
@@ -270,7 +276,9 @@ for epoch in range(10_000):
 
         preds = torch.sigmoid(logits)
 
-        loss = occ_loss_fn(preds, query_occ)
+        # loss = occ_loss_fn(preds, query_occ)
+        loss = focal_loss(preds, query_occ, config.gamma)
+
         loss = torch.mean(loss)
 
         loss.backward()

@@ -312,7 +312,7 @@ if False:
     # depth pixels, all classes
     anchor_inds = np.c_[uu.flatten(), vv.flatten()]
     anchor_uv = anchor_inds + .5
-elif True:
+elif False:
     # depth pixels, included classes
     included_mask = np.sum([(cat_imgs[img_ind] == c) for c in included_classes], axis=0)
     anchor_inds = np.argwhere(included_mask > 0)[:, [1, 0]]
@@ -320,7 +320,7 @@ elif True:
         np.random.choice(np.arange(len(anchor_inds)), size=200, replace=False)
     ]
     anchor_uv = anchor_inds + .5
-elif False:
+elif True:
     # SFM points, all classes
     anchor_uv = visible_pt_uv
     anchor_inds = np.floor(anchor_uv).astype(int)

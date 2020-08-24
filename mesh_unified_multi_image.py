@@ -178,7 +178,6 @@ tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
 """
 
 house_dir = test_house_dirs[-2]
-img_ind = 37
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
@@ -298,65 +297,10 @@ for i, im_id in enumerate(im_ids):
         [[*r[0], t[0]], [*r[1], t[1]], [*r[2], t[2]], [0, 0, 0, 1]]
     )
 
-depth_img = depth_imgs[img_ind]
-uu, vv = np.meshgrid(
-    np.arange(50, depth_img.shape[1], 40), np.arange(50, depth_img.shape[0], 40)
-)
+maxbounds = np.max(sfm_xyz, axis=0) + 0.2
+minbounds = np.min(sfm_xyz, axis=0) - 0.2
 
-im = ims[img_ind]
-visible_inds = (im.point3D_ids != -1) & (np.array([i in pts for i in im.point3D_ids]))
-visible_pt_ids = im.point3D_ids[visible_inds]
-visible_pt_uv = im.xys[visible_inds]
-
-if False:
-    # depth pixels, all classes
-    anchor_inds = np.c_[uu.flatten(), vv.flatten()]
-    anchor_uv = anchor_inds + .5
-elif True:
-    # depth pixels, included classes
-    included_mask = np.sum([(cat_imgs[img_ind] == c) for c in included_classes], axis=0)
-    anchor_inds = np.argwhere(included_mask > 0)[:, [1, 0]]
-    anchor_inds = anchor_inds[
-        np.random.choice(np.arange(len(anchor_inds)), size=200, replace=False)
-    ]
-    anchor_uv = anchor_inds + .5
-elif False:
-    # SFM points, all classes
-    anchor_uv = visible_pt_uv
-    anchor_inds = np.floor(anchor_uv).astype(int)
-
-anchor_xyz_cam = (
-    np.linalg.inv(camera_intrinsic) @ np.c_[anchor_uv, np.ones(len(anchor_uv))].T
-).T * depth_img[anchor_inds[:, 1], anchor_inds[:, 0], None]
-anchor_xyz = (
-    camera_extrinsics[img_ind] @ np.c_[anchor_xyz_cam, np.ones(len(anchor_xyz_cam))].T
-).T[:, :3]
-
-anchor_xyz_cam_u = anchor_xyz_cam / np.linalg.norm(
-    anchor_xyz_cam, axis=-1, keepdims=True
-)
-center_pixel_u = np.array([0, 0, 1])
-cross = np.cross(center_pixel_u, anchor_xyz_cam_u)
-cross /= np.linalg.norm(cross, axis=-1, keepdims=True)
-dot = np.dot(center_pixel_u, anchor_xyz_cam_u.T)
-axis = cross
-angle = np.arccos(dot)
-cam2anchor_rot = scipy.spatial.transform.Rotation.from_rotvec(
-    axis * angle[:, None]
-).as_matrix()
-
-anchor_xyz_cam_rotated = np.stack(
-    [
-        (np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]).T
-        for i in range(len(anchor_xyz_cam))
-    ],
-    axis=0,
-)
-
-maxbounds = np.max(anchor_xyz, axis=0) + 0.2
-minbounds = np.min(anchor_xyz, axis=0) - 0.2
-
-res = 0.02
+res = 0.04
 x = np.arange(minbounds[0], maxbounds[0], res)
 y = np.arange(minbounds[1], maxbounds[1], res)
 z = np.arange(minbounds[2], maxbounds[2], res)
@@ -369,43 +313,88 @@ z = np.arange(len(z), dtype=int)
 xx, yy, zz = np.meshgrid(x, y, z)
 query_inds = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
 
-pred_vols = np.ones((len(anchor_uv), *xx.shape)) * np.nan
+# pred_vols = np.ones((len(ims), *xx.shape)) * np.nan
+pred_vols = np.ones((5, *xx.shape)) * np.nan
 
+img_feats = torch.cat([cnn(img_t[None])[0].cpu() for img_t in imgs_t], dim=0)
 
-img_feat, _ = cnn(imgs_t[None, img_ind])
+for im_id in tqdm.tqdm(im_ids[:5]):
+    im = ims[im_id]
+    img_ind = im_id - 1
 
-anchor_uv_t = (
-    anchor_uv
-    / [depth_img.shape[1], depth_img.shape[0]]
-    * [img_feat.shape[3], img_feat.shape[2]]
-)
-pixel_feats = interp_img(img_feat[0], torch.Tensor(anchor_uv_t).cuda()).T
+    depth_img = depth_imgs[img_ind]
 
+    visible_inds = (im.point3D_ids != -1) & (np.array([i in pts for i in im.point3D_ids]))
+    visible_pt_ids = im.point3D_ids[visible_inds]
+    visible_pt_uv = im.xys[visible_inds]
 
-for i in tqdm.trange(len(anchor_uv)):
-    in_range_inds = np.linalg.norm((anchor_xyz[i] - query_xyz), axis=-1) < 0.2
-    cur_query_xyz = query_xyz[in_range_inds]
-    cur_query_inds = query_inds[in_range_inds]
+    anchor_uv = visible_pt_uv
+    anchor_inds = np.floor(anchor_uv).astype(int)
+
+    anchor_xyz_cam = (
+        np.linalg.inv(camera_intrinsic) @ np.c_[anchor_uv, np.ones(len(anchor_uv))].T
+    ).T * depth_img[anchor_inds[:, 1], anchor_inds[:, 0], None]
+    anchor_xyz = (
+        camera_extrinsics[img_ind] @ np.c_[anchor_xyz_cam, np.ones(len(anchor_xyz_cam))].T
+    ).T[:, :3]
+    
+    anchor_xyz_cam_u = anchor_xyz_cam / np.linalg.norm(
+        anchor_xyz_cam, axis=-1, keepdims=True
+    )
+    center_pixel_u = np.array([0, 0, 1])
+    cross = np.cross(center_pixel_u, anchor_xyz_cam_u)
+    cross /= np.linalg.norm(cross, axis=-1, keepdims=True)
+    dot = np.dot(center_pixel_u, anchor_xyz_cam_u.T)
+    axis = cross
+    angle = np.arccos(dot)
+    cam2anchor_rot = scipy.spatial.transform.Rotation.from_rotvec(
+        axis * angle[:, None]
+    ).as_matrix()
+    
+    anchor_xyz_cam_rotated = np.stack(
+        [
+            (np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]).T
+            for i in range(len(anchor_xyz_cam))
+        ],
+        axis=0,
+    )
+
+    anchor_uv_t = (
+        anchor_uv
+        / [depth_img.shape[1], depth_img.shape[0]]
+        * [img_feats.shape[3], img_feats.shape[2]]
+    )
+
+    pixel_feats = interp_img(img_feats[img_ind], torch.Tensor(anchor_uv_t)).T.cuda()
 
     query_xyz_cam = (
         np.linalg.inv(camera_extrinsics[img_ind])
-        @ np.c_[cur_query_xyz, np.ones(len(cur_query_xyz))].T
+        @ np.c_[query_xyz, np.ones(len(query_xyz))].T
     ).T[:, :3]
-    query_xyz_rotated = (np.linalg.inv(cam2anchor_rot[i]) @ query_xyz_cam.T).T
-    anchor_xyz_rotated = np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]
-    query_coords = (query_xyz_rotated - anchor_xyz_rotated) / 0.2
-    query_coords = torch.Tensor(query_coords).cuda()
 
-    logits = model["mlp"](
-        query_coords[None],
-        pixel_feats[None, None, i].repeat(1, query_coords.shape[0], 1),
-    )
+    cur_pred_vols = np.ones((len(anchor_uv), *xx.shape)) * np.nan
 
-    preds = torch.sigmoid(logits).cpu().numpy()[0, ..., 0]
-
-    pred_vols[
-        i, cur_query_inds[:, 1], cur_query_inds[:, 0], cur_query_inds[:, 2]
-    ] = preds
+    for i in range(len(anchor_uv)):
+        in_range_inds = np.linalg.norm((anchor_xyz[i] - query_xyz), axis=-1) < 0.2
+        cur_query_xyz_cam = query_xyz_cam[in_range_inds]
+        cur_query_inds = query_inds[in_range_inds]
+    
+        query_xyz_rotated = (np.linalg.inv(cam2anchor_rot[i]) @ cur_query_xyz_cam.T).T
+        anchor_xyz_rotated = np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]
+        query_coords = (query_xyz_rotated - anchor_xyz_rotated) / 0.2
+        query_coords = torch.Tensor(query_coords).cuda()
+    
+        logits = model["mlp"](
+            query_coords[None],
+            pixel_feats[None, None, i].repeat(1, query_coords.shape[0], 1),
+        )
+    
+        preds = torch.sigmoid(logits).cpu().numpy()[0, ..., 0]
+    
+        cur_pred_vols[
+            i, cur_query_inds[:, 1], cur_query_inds[:, 0], cur_query_inds[:, 2]
+        ] = preds
+    pred_vols[img_ind] = np.nanmean(cur_pred_vols, axis=0)
 
 
 pred_vol = np.nanmean(pred_vols, axis=0)

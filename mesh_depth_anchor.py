@@ -177,10 +177,10 @@ for house_dir, b in a.items():
 tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
 """
 
-house_dir = train_house_dirs[1]
-img_ind = 0
-# house_dir = test_house_dirs[-2]
-# img_ind = 424
+# house_dir = train_house_dirs[1]
+# img_ind = 0
+house_dir = test_house_dirs[-2]
+img_ind = 38
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
