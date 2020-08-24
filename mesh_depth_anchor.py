@@ -66,12 +66,14 @@ class FCLayer(torch.nn.Module):
             x = x + inputs
         return x
 
+
 def fc_bn_relu(in_c, out_c):
     return torch.nn.Sequential(
         torch.nn.BatchNorm1d(in_c),
         torch.nn.ReLU(),
         torch.nn.Linear(in_c, out_c, bias=False),
     )
+
 
 class MLP(torch.nn.Module):
     def __init__(self):
@@ -389,7 +391,10 @@ for i in tqdm.trange(int(np.ceil(len(anchor_uv) / anchors_per_batch))):
     start = i * anchors_per_batch
     end = np.minimum(len(pixel_feats), (i + 1) * anchors_per_batch)
 
-    logits = model["mlp"](query_coords[None, start:end], pixel_feats[None, start:end, None].repeat(1, 1, query_coords.shape[1], 1))
+    logits = model["mlp"](
+        query_coords[None, start:end],
+        pixel_feats[None, start:end, None].repeat(1, 1, query_coords.shape[1], 1),
+    )
 
     preds = torch.sigmoid(logits).cpu().numpy()[0, ..., 0]
 
