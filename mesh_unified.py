@@ -178,7 +178,7 @@ tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
 """
 
 house_dir = test_house_dirs[-2]
-img_ind = 37
+img_ind = 409
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
@@ -279,7 +279,7 @@ model = torch.nn.ModuleDict(
     }
 )
 # model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/depth-cond-anchor-212834")["model"])
+model.load_state_dict(torch.load("models/5-class-50hour")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -353,24 +353,22 @@ anchor_xyz_cam_rotated = np.stack(
     axis=0,
 )
 
-maxbounds = np.max(anchor_xyz, axis=0) + 0.2
-minbounds = np.min(anchor_xyz, axis=0) - 0.2
-
 res = 0.02
-x = np.arange(minbounds[0], maxbounds[0], res)
-y = np.arange(minbounds[1], maxbounds[1], res)
-z = np.arange(minbounds[2], maxbounds[2], res)
+maxbounds = np.max(anchor_xyz, axis=0) + .2
+minbounds = np.min(anchor_xyz, axis=0) - .2
+pred_vol_size = maxbounds - minbounds
+n_bins = np.round(pred_vol_size / res).astype(int)
+
+x = np.arange(-.2, .2, res)
+y = np.arange(-.2, .2, res)
+z = np.arange(-.2, .2, res)
 xx, yy, zz = np.meshgrid(x, y, z)
-query_xyz = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
+query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
+query_offsets = query_offsets[np.linalg.norm(query_offsets, axis=-1) < .2]
 
-x = np.arange(len(x), dtype=int)
-y = np.arange(len(y), dtype=int)
-z = np.arange(len(z), dtype=int)
-xx, yy, zz = np.meshgrid(x, y, z)
-query_inds = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
-
-pred_vols = np.ones((len(anchor_uv), *xx.shape)) * np.nan
-
+est_query_xyz = anchor_xyz[:, None] + query_offsets[None]
+query_inds = np.round((est_query_xyz - minbounds) / res).astype(int)
+query_xyz = query_inds * res + minbounds
 
 img_feat, _ = cnn(imgs_t[None, img_ind])
 
@@ -381,11 +379,12 @@ anchor_uv_t = (
 )
 pixel_feats = interp_img(img_feat[0], torch.Tensor(anchor_uv_t).cuda()).T
 
+pred_vol = np.zeros(n_bins)
+count_vol = np.zeros(n_bins, dtype=int)
 
 for i in tqdm.trange(len(anchor_uv)):
-    in_range_inds = np.linalg.norm((anchor_xyz[i] - query_xyz), axis=-1) < 0.2
-    cur_query_xyz = query_xyz[in_range_inds]
-    cur_query_inds = query_inds[in_range_inds]
+    cur_query_xyz = query_xyz[i]
+    cur_query_inds = query_inds[i]
 
     query_xyz_cam = (
         np.linalg.inv(camera_extrinsics[img_ind])
@@ -403,20 +402,23 @@ for i in tqdm.trange(len(anchor_uv)):
 
     preds = torch.sigmoid(logits).cpu().numpy()[0, ..., 0]
 
-    pred_vols[
-        i, cur_query_inds[:, 1], cur_query_inds[:, 0], cur_query_inds[:, 2]
-    ] = preds
+    pred_vol[
+        cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
+    ] += preds
+    count_vol[
+        cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
+    ] += 1
 
+mean_pred_vol = np.zeros_like(pred_vol)
+inds = count_vol > 0
+mean_pred_vol[inds] = pred_vol[inds] / count_vol[inds]
 
-pred_vol = np.nanmean(pred_vols, axis=0)
-mask = ~np.isnan(pred_vol)
 verts, faces, _, _, = skimage.measure.marching_cubes(
-    pred_vol,
+    mean_pred_vol,
     level=0.5,
-    mask=scipy.ndimage.morphology.binary_erosion(mask, iterations=2),
+    mask=scipy.ndimage.morphology.binary_erosion(inds, iterations=2),
 )
-verts = verts - np.array(xx.shape) / 2
-verts = verts[:, [1, 0, 2]]
+verts = verts - n_bins / 2
 verts = verts * res + (maxbounds + minbounds) / 2
 faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
 
@@ -425,6 +427,21 @@ pred_mesh = o3d.geometry.TriangleMesh(
 )
 pred_mesh.compute_vertex_normals()
 pred_mesh.compute_triangle_normals()
+
+count_pts = argwhere(count_vol > 0)
+count_pts = (count_pts - n_bins / 2) * res + (maxbounds + minbounds) / 2
+count_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(count_pts))
+counts = count_vol[count_vol > 0]
+_counts = np.clip(counts, np.percentile(counts, 5), np.percentile(counts, 95))
+_counts -= np.min(_counts)
+_counts /= np.max(_counts)
+count_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(_counts)[:, :3])
+
+pred_pts = argwhere(mean_pred_vol > 0)
+pred_pts = (pred_pts - n_bins / 2) * res + (maxbounds + minbounds) / 2
+pred_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pred_pts))
+preds = mean_pred_vol[mean_pred_vol > 0]
+pred_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(preds)[:, :3])
 
 gt_xyz = fusion_npz["tsdf_point_cloud"][:, :3]
 gt_rgb = fusion_npz["tsdf_point_cloud"][:, 3:] / 255

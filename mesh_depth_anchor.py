@@ -180,7 +180,7 @@ tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
 # house_dir = train_house_dirs[1]
 # img_ind = 0
 house_dir = test_house_dirs[-2]
-img_ind = 38
+img_ind = 39
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
@@ -246,41 +246,12 @@ input_width = imgs_t.shape[3]
 
 model = torch.nn.ModuleDict(
     {
-        "cnn": fpn.FPN(input_height, input_width, 1),
         "mlp": MLP(),
-        # "query_encoder": torch.nn.Sequential(
-        #     FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
-        # ),
-        # "mlp": torch.nn.Sequential(
-        #    FCLayer(67, 128),
-        #    FCLayer(128, 256),
-        #    FCLayer(256, 512),
-        #    FCLayer(512),
-        #    FCLayer(512),
-        #    FCLayer(512, 256),
-        #    FCLayer(256, 64),
-        #    FCLayer(64, 16),
-        #    torch.nn.Linear(16, 1),
-        # ),
-        # "mlp": torch.nn.Sequential(
-        #     FCLayer(256),
-        #     FCLayer(256, 512),
-        #     FCLayer(512, 1024),
-        #     FCLayer(1024),
-        #     FCLayer(1024),
-        #     FCLayer(1024, 512),
-        #     FCLayer(512, 256),
-        #     FCLayer(256, 64),
-        #     FCLayer(64, 16),
-        #     torch.nn.Linear(16, 1),
-        # ),
-        # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
-        # "cnn": unet.UNet(n_channels=3),
         "cnn": fpn.FPN(input_height, input_width, 1),
     }
 )
 # model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/depth-cond-anchor-212834")["model"])
+model.load_state_dict(torch.load("models/5-class-50hour")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)

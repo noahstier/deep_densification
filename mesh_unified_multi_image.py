@@ -194,9 +194,9 @@ pts = {
 }
 
 im_ids = sorted(ims.keys())
-pt_ids = sorted(pts.keys())
+pt_ids = np.array(sorted(pts.keys()))
 
-sfm_xyz = np.stack([pts[i].xyz for i in pt_ids], axis=0)
+sfm_xyz = np.stack([pts[i].xyz for i in pt_ids], axis=0).astype(np.float32)
 
 transform = torchvision.transforms.Compose(
     [
@@ -208,6 +208,7 @@ transform = torchvision.transforms.Compose(
     ]
 )
 
+print('loading images')
 pil_imgs = [PIL.Image.open(os.path.join(rgb_imgdir, ims[i].name)) for i in im_ids]
 imgs = np.stack([np.asarray(img) for img in pil_imgs], axis=0)
 imgs_t = torch.stack([transform(img) for img in pil_imgs], dim=0).cuda()
@@ -224,61 +225,19 @@ cat_imgs = np.stack(
     axis=0,
 )
 
-depth_imgs = (
-    np.stack(
-        [
-            cv2.imread(
-                os.path.join(depth_imgdir, ims[im_id].name.replace("jpg", "png")),
-                cv2.IMREAD_ANYDEPTH,
-            )
-            for im_id in im_ids
-        ],
-        axis=0,
-    ).astype(np.float32)
-    / 1000
-)
-
-
 input_height = imgs_t.shape[2]
 input_width = imgs_t.shape[3]
 
+print('loading model')
 model = torch.nn.ModuleDict(
     {
         "cnn": fpn.FPN(input_height, input_width, 1),
         "mlp": MLP(),
-        # "query_encoder": torch.nn.Sequential(
-        #     FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
-        # ),
-        # "mlp": torch.nn.Sequential(
-        #    FCLayer(67, 128),
-        #    FCLayer(128, 256),
-        #    FCLayer(256, 512),
-        #    FCLayer(512),
-        #    FCLayer(512),
-        #    FCLayer(512, 256),
-        #    FCLayer(256, 64),
-        #    FCLayer(64, 16),
-        #    torch.nn.Linear(16, 1),
-        # ),
-        # "mlp": torch.nn.Sequential(
-        #     FCLayer(256),
-        #     FCLayer(256, 512),
-        #     FCLayer(512, 1024),
-        #     FCLayer(1024),
-        #     FCLayer(1024),
-        #     FCLayer(1024, 512),
-        #     FCLayer(512, 256),
-        #     FCLayer(256, 64),
-        #     FCLayer(64, 16),
-        #     torch.nn.Linear(16, 1),
-        # ),
-        # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
-        # "cnn": unet.UNet(n_channels=3),
         "cnn": fpn.FPN(input_height, input_width, 1),
     }
 )
 # model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/depth-cond-anchor-212834")["model"])
+model.load_state_dict(torch.load("models/5-class-50hour")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -297,47 +256,60 @@ for i, im_id in enumerate(im_ids):
         [[*r[0], t[0]], [*r[1], t[1]], [*r[2], t[2]], [0, 0, 0, 1]]
     )
 
-maxbounds = np.max(sfm_xyz, axis=0) + 0.2
-minbounds = np.min(sfm_xyz, axis=0) - 0.2
+res = 0.02
+maxbounds = np.max(sfm_xyz, axis=0) + .2
+minbounds = np.min(sfm_xyz, axis=0) - .2
+pred_vol_size = maxbounds - minbounds
+n_bins = np.round(pred_vol_size / res).astype(int)
 
-res = 0.04
-x = np.arange(minbounds[0], maxbounds[0], res)
-y = np.arange(minbounds[1], maxbounds[1], res)
-z = np.arange(minbounds[2], maxbounds[2], res)
+x = np.arange(-.2, .2, res)
+y = np.arange(-.2, .2, res)
+z = np.arange(-.2, .2, res)
 xx, yy, zz = np.meshgrid(x, y, z)
-query_xyz = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
+query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
+query_offsets = query_offsets[np.linalg.norm(query_offsets, axis=-1) < .2]
 
-x = np.arange(len(x), dtype=int)
-y = np.arange(len(y), dtype=int)
-z = np.arange(len(z), dtype=int)
-xx, yy, zz = np.meshgrid(x, y, z)
-query_inds = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
+est_query_xyz = sfm_xyz[:, None] + query_offsets[None]
+query_inds = np.round((est_query_xyz - minbounds) / res).astype(int)
+query_xyz = query_inds * res + minbounds
 
-# pred_vols = np.ones((len(ims), *xx.shape)) * np.nan
-pred_vols = np.ones((5, *xx.shape)) * np.nan
+print('extracting image features')
+img_feats = torch.cat([cnn(img_t[None])[0].cpu() for img_t in tqdm.tqdm(imgs_t)], dim=0)
 
-img_feats = torch.cat([cnn(img_t[None])[0].cpu() for img_t in imgs_t], dim=0)
+pred_vol = np.zeros(n_bins)
+count_vol = np.zeros(n_bins, dtype=int)
 
-for im_id in tqdm.tqdm(im_ids[:5]):
+for im_id in tqdm.tqdm(im_ids[1:]):
     im = ims[im_id]
     img_ind = im_id - 1
 
-    depth_img = depth_imgs[img_ind]
+    im_pt_ids = set(im.point3D_ids)
+    visible_pt_inds = np.array([i for i, pt_id in enumerate(pt_ids) if pt_id in im_pt_ids])
+    if len(visible_pt_inds) == 0:
+        continue
+    anchor_xyz = sfm_xyz[visible_pt_inds]
+    anchor_xyz_cam = (np.linalg.inv(camera_extrinsics[img_ind]) @ np.c_[anchor_xyz, np.ones(len(anchor_xyz))].T).T[:, :3]
 
-    visible_inds = (im.point3D_ids != -1) & (np.array([i in pts for i in im.point3D_ids]))
-    visible_pt_ids = im.point3D_ids[visible_inds]
-    visible_pt_uv = im.xys[visible_inds]
+    anchor_uv = (camera_intrinsic @ anchor_xyz_cam.T).T
+    anchor_uv = anchor_uv[:, :2] / anchor_uv[:, 2:]
+    anchor_uv = np.clip(anchor_uv, [0, 0], [imgs.shape[2] - 1, imgs.shape[1] - 1])
+    # anchor_uv = np.stack([xy for i, xy in enumerate(im.xys) if im.point3D_ids[i] in pts], axis=0)
 
-    anchor_uv = visible_pt_uv
     anchor_inds = np.floor(anchor_uv).astype(int)
 
-    anchor_xyz_cam = (
-        np.linalg.inv(camera_intrinsic) @ np.c_[anchor_uv, np.ones(len(anchor_uv))].T
-    ).T * depth_img[anchor_inds[:, 1], anchor_inds[:, 0], None]
-    anchor_xyz = (
-        camera_extrinsics[img_ind] @ np.c_[anchor_xyz_cam, np.ones(len(anchor_xyz_cam))].T
-    ).T[:, :3]
-    
+    anchor_classes = cat_imgs[img_ind, anchor_inds[:, 1], anchor_inds[:, 0]]
+    anchor_included = np.array([i in included_classes for i in anchor_classes])
+
+    if np.sum(anchor_included) == 0:
+        continue
+
+    anchor_xyz = anchor_xyz[anchor_included]
+    anchor_xyz_cam = anchor_xyz_cam[anchor_included]
+    anchor_uv = anchor_uv[anchor_included]
+    anchor_inds = anchor_inds[anchor_included]
+    anchor_classes = anchor_classes[anchor_included]
+    visible_pt_inds = visible_pt_inds[anchor_included]
+
     anchor_xyz_cam_u = anchor_xyz_cam / np.linalg.norm(
         anchor_xyz_cam, axis=-1, keepdims=True
     )
@@ -361,52 +333,49 @@ for im_id in tqdm.tqdm(im_ids[:5]):
 
     anchor_uv_t = (
         anchor_uv
-        / [depth_img.shape[1], depth_img.shape[0]]
+        / [imgs.shape[2], imgs.shape[1]]
         * [img_feats.shape[3], img_feats.shape[2]]
     )
 
     pixel_feats = interp_img(img_feats[img_ind], torch.Tensor(anchor_uv_t)).T.cuda()
-
-    query_xyz_cam = (
-        np.linalg.inv(camera_extrinsics[img_ind])
-        @ np.c_[query_xyz, np.ones(len(query_xyz))].T
-    ).T[:, :3]
-
-    cur_pred_vols = np.ones((len(anchor_uv), *xx.shape)) * np.nan
-
-    for i in range(len(anchor_uv)):
-        in_range_inds = np.linalg.norm((anchor_xyz[i] - query_xyz), axis=-1) < 0.2
-        cur_query_xyz_cam = query_xyz_cam[in_range_inds]
-        cur_query_inds = query_inds[in_range_inds]
+    pixel_feats = pixel_feats[:, None].repeat(1, query_xyz.shape[1], 1)
     
-        query_xyz_rotated = (np.linalg.inv(cam2anchor_rot[i]) @ cur_query_xyz_cam.T).T
+    for i in range(len(anchor_uv)):
+
+        cur_query_xyz = query_xyz[visible_pt_inds[i]]
+        cur_query_inds = query_inds[visible_pt_inds[i]]
+
+        query_xyz_cam = (
+            np.linalg.inv(camera_extrinsics[img_ind])
+            @ np.c_[cur_query_xyz, np.ones(len(cur_query_xyz))].T
+        ).T[:, :3]
+
+        query_xyz_rotated = (np.linalg.inv(cam2anchor_rot[i]) @ query_xyz_cam.T).T
         anchor_xyz_rotated = np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]
         query_coords = (query_xyz_rotated - anchor_xyz_rotated) / 0.2
         query_coords = torch.Tensor(query_coords).cuda()
     
-        logits = model["mlp"](
-            query_coords[None],
-            pixel_feats[None, None, i].repeat(1, query_coords.shape[0], 1),
-        )
+        logits = model["mlp"](query_coords[None], pixel_feats[i])
     
-        preds = torch.sigmoid(logits).cpu().numpy()[0, ..., 0]
+        preds = torch.sigmoid(logits)[0, ..., 0].cpu().numpy()
     
-        cur_pred_vols[
-            i, cur_query_inds[:, 1], cur_query_inds[:, 0], cur_query_inds[:, 2]
-        ] = preds
-    pred_vols[img_ind] = np.nanmean(cur_pred_vols, axis=0)
+        pred_vol[
+            cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
+        ] += preds
+        count_vol[
+            cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
+        ] += 1
 
+mean_pred_vol = np.zeros_like(pred_vol)
+inds = count_vol > 2
+mean_pred_vol[inds] = pred_vol[inds] / count_vol[inds]
 
-pred_vol = np.nanmean(pred_vols, axis=0)
-mask = ~np.isnan(pred_vol)
 verts, faces, _, _, = skimage.measure.marching_cubes(
-    pred_vol,
+    mean_pred_vol,
     level=0.5,
-    mask=scipy.ndimage.morphology.binary_erosion(mask, iterations=2),
+    mask=scipy.ndimage.morphology.binary_erosion(inds, iterations=2),
 )
-verts = verts - np.array(xx.shape) / 2
-verts = verts[:, [1, 0, 2]]
-verts = verts * res + (maxbounds + minbounds) / 2
+verts = (verts - n_bins / 2) * res + (maxbounds + minbounds) / 2
 faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
 
 pred_mesh = o3d.geometry.TriangleMesh(
@@ -422,37 +391,47 @@ gt_xyz_cam = (
 ).T[:, :3]
 gt_uv = (camera_intrinsic @ gt_xyz_cam.T).T
 gt_uv = gt_uv[:, :2] / gt_uv[:, 2:]
-inds = (
-    (gt_xyz_cam[:, 2] > 0)
-    & (gt_uv[:, 0] >= 0)
-    & (gt_uv[:, 0] <= imwidth)
-    & (gt_uv[:, 1] >= 0)
-    & (gt_uv[:, 1] <= imheight)
-)
-gt_xyz = gt_xyz[inds]
-gt_rgb = gt_rgb[inds]
 gt_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(gt_xyz))
 gt_pcd.colors = o3d.utility.Vector3dVector(gt_rgb)
-
-gt_pcd_cam = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(gt_xyz_cam[inds]))
-gt_pcd_cam.colors = o3d.utility.Vector3dVector(gt_rgb)
 
 cam_pcd = o3d.geometry.PointCloud(
     o3d.utility.Vector3dVector(camera_extrinsics[img_ind : img_ind + 1, :3, 3])
 )
 cam_pcd.paint_uniform_color(np.array([1, 0, 0], dtype=np.float64))
 
-anchor_spheres = sum(
-    [
-        o3d.geometry.TriangleMesh.create_sphere(radius=0.02)
-        .translate(anchor_xyz[i])
-        .paint_uniform_color(np.array([0, 0, 1]))
-        .compute_vertex_normals()
-        for i in range(len(anchor_xyz))
-    ]
-)
+count_pts = argwhere(count_vol > 0)
+count_pts = (count_pts - n_bins / 2) * res + (maxbounds + minbounds) / 2
+count_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(count_pts))
+counts = count_vol[count_vol > 0]
+_counts = np.clip(counts, np.percentile(counts, 5), np.percentile(counts, 95))
+_counts -= np.min(_counts)
+_counts /= np.max(_counts)
+count_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(_counts)[:, :3])
 
-geoms = [pred_mesh, gt_pcd, anchor_spheres, cam_pcd]
+pred_pts = argwhere(mean_pred_vol > 0)
+pred_pts = (pred_pts - n_bins / 2) * res + (maxbounds + minbounds) / 2
+pred_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pred_pts))
+preds = mean_pred_vol[mean_pred_vol > 0]
+pred_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(preds)[:, :3])
+
+# anchor_spheres = sum(
+#     [
+#         o3d.geometry.TriangleMesh.create_sphere(radius=0.02)
+#         .translate(sfm_xyz[i])
+#         .paint_uniform_color(np.array([0, 0, 1]))
+#         .compute_vertex_normals()
+#         for i in range(len(sfm_xyz))
+#     ]
+# )
+anchor_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(sfm_xyz))
+anchor_pcd.paint_uniform_color(np.array([0, 0, 1], dtype=np.float64))
+
+# geoms = [pred_mesh, gt_pcd, anchor_pcd, cam_pcd, count_pcd]
+# geoms = [pred_mesh, gt_pcd, anchor_pcd, cam_pcd, pred_pcd]
+geoms = [pred_mesh, gt_pcd, anchor_pcd, cam_pcd]
+# geoms = [pred_mesh]
+# geoms = [count_pcd]
+# geoms = [pred_mesh, pred_pcd]
 visibility = [True] * len(geoms)
 
 

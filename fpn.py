@@ -12,11 +12,11 @@ transform = torchvision.transforms.Compose(
 )
 
 
-def conv_bn_relu(in_channels, out_channels):
+def bn_relu_conv(in_channels, out_channels, ksize=3):
     return torch.nn.Sequential(
         torch.nn.BatchNorm2d(in_channels),
         torch.nn.ReLU(),
-        torch.nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+        torch.nn.Conv2d(in_channels, out_channels, ksize, padding=1, bias=False),
     )
 
 
@@ -34,30 +34,33 @@ class FPN(torch.nn.Module):
 
         self.scale_heads = torch.nn.ModuleList(
             [
-                conv_bn_relu(256, 128),
+                bn_relu_conv(256, 128),
                 torch.nn.Sequential(
-                    conv_bn_relu(256, 128),
+                    bn_relu_conv(256, 128),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
                 ),
                 torch.nn.Sequential(
-                    conv_bn_relu(256, 128),
+                    bn_relu_conv(256, 128),
                     torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
-                    conv_bn_relu(128, 128),
+                    bn_relu_conv(128, 128),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
                 ),
                 torch.nn.Sequential(
-                    conv_bn_relu(256, 128),
+                    bn_relu_conv(256, 128),
                     torch.nn.Upsample(dims[2], mode="bilinear", align_corners=False),
-                    conv_bn_relu(128, 128),
+                    bn_relu_conv(128, 128),
                     torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
-                    conv_bn_relu(128, 128),
+                    bn_relu_conv(128, 128),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
                 ),
             ]
         )
 
+        # self.refiner = torch.nn.Sequential(
+        #     bn_relu_conv(128, 128), bn_relu_conv(128, 128),
+        # )
         self.refiner = torch.nn.Sequential(
-            conv_bn_relu(128, 128), conv_bn_relu(128, 128),
+            bn_relu_conv(512, 256), bn_relu_conv(256, 128),
         )
 
         # self.classifier = torch.nn.Sequential(
@@ -70,7 +73,7 @@ class FPN(torch.nn.Module):
     def forward(self, imgs):
         fpn_features = self.fpn(imgs)
         consolidated_feature = self.refiner(
-            sum([self.scale_heads[i](fpn_features[i]) for i in range(4)])
+            torch.cat([self.scale_heads[i](fpn_features[i]) for i in range(4)], dim=1)
         )
         # logits = self.classifier(consolidated_feature)
         logits = 0

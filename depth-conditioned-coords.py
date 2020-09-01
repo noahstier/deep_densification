@@ -22,8 +22,8 @@ import config
 import depth_loader
 
 torch.manual_seed(0)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
 np.random.seed(0)
 
 def focal_loss(inputs, targets, gamma):
@@ -64,7 +64,7 @@ class FCLayer(torch.nn.Module):
         return x
 
 
-def fc_bn_relu(in_c, out_c):
+def bn_relu_fc(in_c, out_c):
     return torch.nn.Sequential(
         torch.nn.BatchNorm1d(in_c),
         torch.nn.ReLU(),
@@ -77,25 +77,25 @@ class MLP(torch.nn.Module):
         super().__init__()
         self.coord_encoder = torch.nn.Sequential(
             torch.nn.Linear(3, 32),
-            fc_bn_relu(32, 32),
-            fc_bn_relu(32, 64),
-            fc_bn_relu(64, 128),
+            bn_relu_fc(32, 32),
+            bn_relu_fc(32, 64),
+            bn_relu_fc(64, 128),
         )
 
         self.offsetter = torch.nn.Sequential(
-            fc_bn_relu(256, 256),
-            fc_bn_relu(256, 128),
-            fc_bn_relu(128, 128),
-            fc_bn_relu(128, 128),
-            fc_bn_relu(128, 128),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 128),
+            bn_relu_fc(128, 128),
+            bn_relu_fc(128, 128),
+            bn_relu_fc(128, 128),
         )
 
         self.classifier = torch.nn.Sequential(
-            fc_bn_relu(128, 128),
-            fc_bn_relu(128, 64),
-            fc_bn_relu(64, 32),
-            fc_bn_relu(32, 16),
-            torch.nn.Linear(16, 1, bias=False),
+            bn_relu_fc(128, 128),
+            bn_relu_fc(128, 64),
+            bn_relu_fc(64, 32),
+            bn_relu_fc(32, 16),
+            bn_relu_fc(16, 1),
         )
 
     def forward(self, coords, feats):
@@ -205,7 +205,7 @@ train_house_dirs = house_dirs[10:]
 dset = depth_loader.Dataset(
     train_house_dirs,
     per_img_classes,
-    included_classes,
+    list(range(91)),
     n_anchors=config.n_anchors,
     n_queries_per_anchor=config.n_queries_per_anchor,
 )
@@ -276,8 +276,8 @@ for epoch in range(10_000):
 
         preds = torch.sigmoid(logits)
 
-        # loss = occ_loss_fn(preds, query_occ)
-        loss = focal_loss(preds, query_occ, config.gamma)
+        loss = occ_loss_fn(preds, query_occ)
+        # loss = focal_loss(preds, query_occ, config.gamma)
 
         loss = torch.mean(loss)
 
@@ -307,8 +307,8 @@ for epoch in range(10_000):
         # occ_loss = occ_loss_fn(preds, query_occ)
         # cat_loss = cat_loss_fn(cat_logits, cat_gt[visible_img_inds])
 
-        pos_loss = torch.mean(occ_loss_fn(preds[pos_inds], query_occ[pos_inds]))
-        neg_loss = torch.mean(occ_loss_fn(preds[neg_inds], query_occ[neg_inds]))
+        # pos_loss = torch.mean(occ_loss_fn(preds[pos_inds], query_occ[pos_inds]))
+        # neg_loss = torch.mean(occ_loss_fn(preds[neg_inds], query_occ[neg_inds]))
 
         # loss = pos_loss + neg_loss
 
@@ -371,8 +371,8 @@ for epoch in range(10_000):
         if config.wandb:
             wandb.log(
                 {
-                    "pos loss": pos_loss.item(),
-                    "neg loss": neg_loss.item(),
+                    # "pos loss": pos_loss.item(),
+                    # "neg loss": neg_loss.item(),
                     "loss": loss.item(),
                     # "cat_loss": cat_loss.item(),
                     "logits": wandb.Histogram(logits.detach().cpu().numpy()),
@@ -390,7 +390,7 @@ for epoch in range(10_000):
                 step=step,
             )
 
-    name = "depth-cond-anchor-{}".format(step)
+    name = "all-classes-{}".format(step)
     torch.save(
         {"model": model.state_dict(), "opt": optimizer.state_dict()},
         os.path.join("models", name),

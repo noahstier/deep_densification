@@ -83,12 +83,6 @@ class Dataset(torch.utils.data.Dataset):
                 if img_ind == 0:
                     continue
 
-                """
-                """
-                if img_ind % 5 != 0:
-                    continue
-                """
-                """
                 img_name = os.path.basename(depth_imgfile)
                 class_counts = per_img_classes[house_name][img_name]
                 for c in self.included_classes:
