@@ -50,7 +50,7 @@ backward = camera_pose[:3, 2]
 forward = -backward
 
 renderer = pyrender.OffscreenRenderer(w, h)
-scene = pyrender.Scene(bg_color=[.4, .6, .6])
+scene = pyrender.Scene(bg_color=[0.4, 0.6, 0.6])
 camera = pyrender.IntrinsicsCamera(fx, fy, cx, cy)
 scene.add(camera, pose=camera_pose)
 light = pyrender.SpotLight(
@@ -76,7 +76,9 @@ for i in tqdm.trange(n):
         r2 = np.eye(4)
         t = np.eye(4)
 
-        r1[:3, :3] = scipy.spatial.transform.Rotation.from_rotvec([0, np.pi, 0]).as_matrix()
+        r1[:3, :3] = scipy.spatial.transform.Rotation.from_rotvec(
+            [0, np.pi, 0]
+        ).as_matrix()
 
         x = np.random.normal(0, 1, size=5)
         axis = x[:3] / np.linalg.norm(x, axis=-1, keepdims=True)

@@ -244,7 +244,9 @@ anchor_uv_t = (
     / [depth_img.shape[1], depth_img.shape[0]]
     * [img_feat.shape[3], img_feat.shape[2]]
 )
-pixel_feats = depth_conditioned_coords.interp_img(img_feat[0], torch.Tensor(anchor_uv_t).cuda()).T
+pixel_feats = depth_conditioned_coords.interp_img(
+    img_feat[0], torch.Tensor(anchor_uv_t).cuda()
+).T
 
 anchors_per_batch = 24
 for i in tqdm.trange(int(np.ceil(len(anchor_uv) / anchors_per_batch))):
@@ -295,7 +297,9 @@ o3d.visualization.draw_geometries([gt_pcd, mesh, pos_pcd, neg_pcd])
 
 meshes = []
 for i in range(len(pred_vols)):
-    verts, faces, _, _, = skimage.measure.marching_cubes_lewiner(pred_vols[i], level=0.5)
+    verts, faces, _, _, = skimage.measure.marching_cubes_lewiner(
+        pred_vols[i], level=0.5
+    )
 
     verts = verts[:, [1, 0, 2]]
     faces = np.concatenate((faces, faces[:, ::-1]), axis=0)

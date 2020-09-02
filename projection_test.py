@@ -111,13 +111,16 @@ for i in range(len(pt_ids)):
     pt_id = pt_ids[i]
     pt = pts[pt_id]
 
-    uv1 = np.stack([ims[im_id].xys[idx] for im_id, idx in zip(pt.image_ids, pt.point2D_idxs)], axis=0)
-    
+    uv1 = np.stack(
+        [ims[im_id].xys[idx] for im_id, idx in zip(pt.image_ids, pt.point2D_idxs)],
+        axis=0,
+    )
+
     img_inds = [im_ids.index(im_id) for im_id in pt.image_ids]
     xyz_cam = (np.linalg.inv(camera_extrinsics[img_inds]) @ [*pt.xyz, 1])[:, :3]
     uv2 = (camera_intrinsic @ xyz_cam.T).T
     uv2 = uv2[:, :2] / uv2[:, 2:]
-    
+
     dists = np.linalg.norm(uv1 - uv2, axis=1)
     maxdist = np.max(dists)
     m.append(maxdist)
@@ -127,13 +130,8 @@ for i, im_id in enumerate(pt.image_ids):
 
     subplot(4, 4, i + 1)
     imshow(imgs[img_inds[i]])
-    plot(uv1[i, 0], uv1[i, 1], 'b.')
-    plot(uv2[i, 0], uv2[i, 1], 'r.')
-    axis('off')
+    plot(uv1[i, 0], uv1[i, 1], "b.")
+    plot(uv2[i, 0], uv2[i, 1], "r.")
+    axis("off")
 
 tight_layout()
-
-
-
-
-

@@ -199,7 +199,7 @@ visible_pt_uv = im.xys[visible_inds]
 if False:
     # depth pixels, all classes
     anchor_inds = np.c_[uu.flatten(), vv.flatten()]
-    anchor_uv = anchor_inds + .5
+    anchor_uv = anchor_inds + 0.5
 elif False:
     # depth pixels, included classes
     included_mask = np.sum([(cat_imgs[img_ind] == c) for c in included_classes], axis=0)
@@ -207,7 +207,7 @@ elif False:
     anchor_inds = anchor_inds[
         np.random.choice(np.arange(len(anchor_inds)), size=200, replace=False)
     ]
-    anchor_uv = anchor_inds + .5
+    anchor_uv = anchor_inds + 0.5
 elif True:
     # SFM points, all classes
     anchor_uv = visible_pt_uv
@@ -242,17 +242,17 @@ anchor_xyz_cam_rotated = np.stack(
 )
 
 res = 0.02
-maxbounds = np.max(anchor_xyz, axis=0) + .2
-minbounds = np.min(anchor_xyz, axis=0) - .2
+maxbounds = np.max(anchor_xyz, axis=0) + 0.2
+minbounds = np.min(anchor_xyz, axis=0) - 0.2
 pred_vol_size = maxbounds - minbounds
 n_bins = np.round(pred_vol_size / res).astype(int)
 
-x = np.arange(-.2, .2, res)
-y = np.arange(-.2, .2, res)
-z = np.arange(-.2, .2, res)
+x = np.arange(-0.2, 0.2, res)
+y = np.arange(-0.2, 0.2, res)
+z = np.arange(-0.2, 0.2, res)
 xx, yy, zz = np.meshgrid(x, y, z)
 query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
-query_offsets = query_offsets[np.linalg.norm(query_offsets, axis=-1) < .2]
+query_offsets = query_offsets[np.linalg.norm(query_offsets, axis=-1) < 0.2]
 
 est_query_xyz = anchor_xyz[:, None] + query_offsets[None]
 query_inds = np.round((est_query_xyz - minbounds) / res).astype(int)
@@ -265,7 +265,9 @@ anchor_uv_t = (
     / [depth_img.shape[1], depth_img.shape[0]]
     * [img_feat.shape[3], img_feat.shape[2]]
 )
-pixel_feats = depth_conditioned_coords.interp_img(img_feat[0], torch.Tensor(anchor_uv_t).cuda()).T
+pixel_feats = depth_conditioned_coords.interp_img(
+    img_feat[0], torch.Tensor(anchor_uv_t).cuda()
+).T
 
 pred_vol = np.zeros(n_bins)
 count_vol = np.zeros(n_bins, dtype=int)
@@ -290,12 +292,8 @@ for i in tqdm.trange(len(anchor_uv)):
 
     preds = torch.sigmoid(logits).cpu().numpy()[0, ..., 0]
 
-    pred_vol[
-        cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
-    ] += preds
-    count_vol[
-        cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
-    ] += 1
+    pred_vol[cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]] += preds
+    count_vol[cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]] += 1
 
 mean_pred_vol = np.zeros_like(pred_vol)
 inds = count_vol > 0

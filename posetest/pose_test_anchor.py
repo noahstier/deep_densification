@@ -21,10 +21,10 @@ trimesh.constants.log.setLevel(logging.ERROR)
 import fpn
 
 
-# torch.manual_seed(1)
+torch.manual_seed(1)
 # torch.backends.cudnn.deterministic = True
 # torch.backends.cudnn.benchmark = False
-# np.random.seed(1)
+np.random.seed(1)
 
 
 def log_transform(x, shift=1):
@@ -78,6 +78,7 @@ def bn_relu_fc(in_c, out_c):
         torch.nn.Linear(in_c, out_c, bias=False),
     )
 
+
 class res_block(torch.nn.Module):
     def __init__(self, n_channels):
         super().__init__()
@@ -103,7 +104,7 @@ class MLP(torch.nn.Module):
             bn_relu_fc(64, 128),
             bn_relu_fc(128, 256),
             torch.nn.BatchNorm1d(256),
-            torch.nn.ReLU()
+            torch.nn.ReLU(),
         )
 
         self.offsetter = torch.nn.Sequential(

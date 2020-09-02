@@ -21,11 +21,11 @@ import unet
 import config
 import depth_loader
 
+
 def focal_loss(inputs, targets, gamma):
     pt = (inputs * targets) + (1 - inputs) * (1 - targets)
-    loss = - (1 - pt) ** gamma * torch.log(pt)
+    loss = -((1 - pt) ** gamma) * torch.log(pt)
     return loss
-
 
 
 class FCLayer(torch.nn.Module):
@@ -66,6 +66,7 @@ def bn_relu_fc(in_c, out_c):
         torch.nn.Linear(in_c, out_c, bias=False),
     )
 
+
 class MLP(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -75,7 +76,7 @@ class MLP(torch.nn.Module):
             bn_relu_fc(32, 64),
             bn_relu_fc(64, 128),
             torch.nn.BatchNorm1d(128),
-            torch.nn.ReLU()
+            torch.nn.ReLU(),
         )
 
         self.offsetter = torch.nn.Sequential(
@@ -139,15 +140,13 @@ def interp_img(img, xy):
     )
     return interped
 
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
     np.random.seed(0)
-    
-    
-    
-    
+
     house_dirs = sorted(
         [
             d
@@ -156,14 +155,14 @@ if __name__ == "__main__":
             and os.path.exists(os.path.join(d, "poses.npz"))
         ]
     )
-    
+
     """
     """
     with open("per_img_classes.pkl", "rb") as f:
         per_img_classes = pickle.load(f)
     """
     """
-    
+
     included_classes = [5, 11, 20, 67, 72]
     test_house_dirs = house_dirs[:10]
     train_house_dirs = house_dirs[10:]
@@ -182,11 +181,11 @@ if __name__ == "__main__":
         drop_last=True,
         pin_memory=True,
     )
-    
-    input_height, input_width = fpn.transform(
-        PIL.Image.fromarray(dset[0][-4])
-    ).shape[1:]
-    
+
+    input_height, input_width = fpn.transform(PIL.Image.fromarray(dset[0][-4])).shape[
+        1:
+    ]
+
     model = torch.nn.ModuleDict(
         {
             "cnn": fpn.FPN(input_height, input_width, 1),
@@ -210,25 +209,24 @@ if __name__ == "__main__":
             # "cnn": unet.UNet(n_channels=3),
         }
     ).cuda()
-    
+
     optimizer = torch.optim.Adam(model.parameters())
-    
+
     if False:
         checkpoint = torch.load("models/5-class-128pt")
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["opt"])
-    
-    
+
     if config.wandb:
         wandb.init(project="deepmvs")
         wandb.watch(model)
-    
+
     occ_loss_fn = torch.nn.BCELoss(reduction="none").cuda()
-    
+
     step = -1
     for epoch in range(10_000):
         print("epoch {}".format(epoch))
-    
+
         model.train()
         for batch in tqdm.tqdm(loader):
             (
@@ -248,47 +246,52 @@ if __name__ == "__main__":
                 extrinsic,
                 intrinsic,
             ) = batch
-    
+
             if len(query_coords) < config.img_batch_size:
                 raise Exception("gah")
-    
+
             rgb_img_t = rgb_img_t.cuda()
             query_coords = query_coords.cuda()
             query_tsdf = query_tsdf.float().cuda()
             query_uv_t = query_uv_t.cuda()
             query_occ = (query_tsdf <= 0).float()
-    
+
             optimizer.zero_grad()
-    
+
             img_feats, _, _ = model["cnn"](rgb_img_t)
             img_feats = torch.nn.functional.interpolate(
-                img_feats, size=(rgb_img_t.shape[2:]), mode="bilinear", align_corners=False
+                img_feats,
+                size=(rgb_img_t.shape[2:]),
+                mode="bilinear",
+                align_corners=False,
             )
-    
+
             anchor_uv_t_t = (
                 anchor_uv_t
                 / torch.Tensor([rgb_img_t.shape[3], rgb_img_t.shape[2]])
                 * torch.Tensor([img_feats.shape[3], img_feats.shape[2]])
             ).cuda()
-    
+
             pixel_feats = []
             for i in range(len(img_feats)):
                 pixel_feats.append(interp_img(img_feats[i], anchor_uv_t_t[i]).T)
             pixel_feats = torch.stack(pixel_feats, dim=0).float()
-            pixel_feats = pixel_feats[:, :, None].repeat((1, 1, query_coords.shape[2], 1))
-    
+            pixel_feats = pixel_feats[:, :, None].repeat(
+                (1, 1, query_coords.shape[2], 1)
+            )
+
             logits = model["mlp"](query_coords, pixel_feats)[..., 0]
-    
+
             preds = torch.sigmoid(logits)
-    
+
             loss = occ_loss_fn(preds, query_occ)
             # loss = focal_loss(preds, query_occ, config.gamma)
-    
+
             loss = torch.mean(loss)
-    
+
             loss.backward()
             optimizer.step()
-    
+
             pos_inds = query_occ.bool()
             neg_inds = ~pos_inds
             true_pos = (preds > 0.5) & pos_inds
@@ -299,24 +302,24 @@ if __name__ == "__main__":
                 denom = torch.sum(pos_inds[inds]).float()
                 if denom > 0:
                     class_acc[c] = torch.sum(true_pos[inds]) / denom
-    
+
             pos_acc = torch.sum((preds > 0.5) & pos_inds) / pos_inds.sum().float()
             neg_acc = torch.sum((preds < 0.5) & neg_inds) / neg_inds.sum().float()
-    
+
             true_pos = torch.sum((preds > 0.5) & pos_inds).float()
             all_predicted_pos = torch.sum(preds > 0.5)
             all_actual_pos = torch.sum(pos_inds)
             precision = true_pos / all_predicted_pos
             recall = true_pos / all_actual_pos
-    
+
             # occ_loss = occ_loss_fn(preds, query_occ)
             # cat_loss = cat_loss_fn(cat_logits, cat_gt[visible_img_inds])
-    
+
             # pos_loss = torch.mean(occ_loss_fn(preds[pos_inds], query_occ[pos_inds]))
             # neg_loss = torch.mean(occ_loss_fn(preds[neg_inds], query_occ[neg_inds]))
-    
+
             # loss = pos_loss + neg_loss
-    
+
             """
             i = 1
             j = 3
@@ -371,7 +374,7 @@ if __name__ == "__main__":
             pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(fpr[0, 0])[:, :3])
             o3d.visualization.draw_geometries([mesh, pcd])
             """
-    
+
             step += 1
             if config.wandb:
                 wandb.log(
@@ -394,13 +397,13 @@ if __name__ == "__main__":
                     },
                     step=step,
                 )
-    
+
         name = "all-classes-{}".format(step)
         torch.save(
             {"model": model.state_dict(), "opt": optimizer.state_dict()},
             os.path.join("models", name),
         )
-    
+
     """
     j = 0
     q = query_xyz_cam[j].cpu().numpy().reshape(-1, 3)

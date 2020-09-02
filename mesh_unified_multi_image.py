@@ -96,7 +96,7 @@ transform = torchvision.transforms.Compose(
     ]
 )
 
-print('loading images')
+print("loading images")
 pil_imgs = [PIL.Image.open(os.path.join(rgb_imgdir, ims[i].name)) for i in im_ids]
 imgs = np.stack([np.asarray(img) for img in pil_imgs], axis=0)
 imgs_t = torch.stack([transform(img) for img in pil_imgs], dim=0).cuda()
@@ -116,7 +116,7 @@ cat_imgs = np.stack(
 input_height = imgs_t.shape[2]
 input_width = imgs_t.shape[3]
 
-print('loading model')
+print("loading model")
 model = torch.nn.ModuleDict(
     {
         "cnn": fpn.FPN(input_height, input_width, 1),
@@ -145,39 +145,44 @@ for i, im_id in enumerate(im_ids):
     )
 
 res = 0.02
-maxbounds = np.max(sfm_xyz, axis=0) + .2
-minbounds = np.min(sfm_xyz, axis=0) - .2
+maxbounds = np.max(sfm_xyz, axis=0) + 0.2
+minbounds = np.min(sfm_xyz, axis=0) - 0.2
 pred_vol_size = maxbounds - minbounds
 n_bins = np.round(pred_vol_size / res).astype(int)
 
-x = np.arange(-.2, .2, res)
-y = np.arange(-.2, .2, res)
-z = np.arange(-.2, .2, res)
+x = np.arange(-0.2, 0.2, res)
+y = np.arange(-0.2, 0.2, res)
+z = np.arange(-0.2, 0.2, res)
 xx, yy, zz = np.meshgrid(x, y, z)
 query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
-query_offsets = query_offsets[np.linalg.norm(query_offsets, axis=-1) < .2]
+query_offsets = query_offsets[np.linalg.norm(query_offsets, axis=-1) < 0.2]
 
 est_query_xyz = sfm_xyz[:, None] + query_offsets[None]
 query_inds = np.round((est_query_xyz - minbounds) / res).astype(int)
 query_xyz = query_inds * res + minbounds
 
-print('extracting image features')
+print("extracting image features")
 img_feats = torch.cat([cnn(img_t[None])[0].cpu() for img_t in tqdm.tqdm(imgs_t)], dim=0)
 
 pred_vol = np.zeros(n_bins)
 count_vol = np.zeros(n_bins, dtype=int)
 
-print('inference')
+print("inference")
 for im_id in tqdm.tqdm(im_ids[1:]):
     im = ims[im_id]
     img_ind = im_id - 1
 
     im_pt_ids = set(im.point3D_ids)
-    visible_pt_inds = np.array([i for i, pt_id in enumerate(pt_ids) if pt_id in im_pt_ids])
+    visible_pt_inds = np.array(
+        [i for i, pt_id in enumerate(pt_ids) if pt_id in im_pt_ids]
+    )
     if len(visible_pt_inds) == 0:
         continue
     anchor_xyz = sfm_xyz[visible_pt_inds]
-    anchor_xyz_cam = (np.linalg.inv(camera_extrinsics[img_ind]) @ np.c_[anchor_xyz, np.ones(len(anchor_xyz))].T).T[:, :3]
+    anchor_xyz_cam = (
+        np.linalg.inv(camera_extrinsics[img_ind])
+        @ np.c_[anchor_xyz, np.ones(len(anchor_xyz))].T
+    ).T[:, :3]
 
     anchor_uv = (camera_intrinsic @ anchor_xyz_cam.T).T
     anchor_uv = anchor_uv[:, :2] / anchor_uv[:, 2:]
@@ -211,7 +216,7 @@ for im_id in tqdm.tqdm(im_ids[1:]):
     cam2anchor_rot = scipy.spatial.transform.Rotation.from_rotvec(
         axis * angle[:, None]
     ).as_matrix()
-    
+
     anchor_xyz_cam_rotated = np.stack(
         [
             (np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]).T
@@ -226,9 +231,11 @@ for im_id in tqdm.tqdm(im_ids[1:]):
         * [img_feats.shape[3], img_feats.shape[2]]
     )
 
-    pixel_feats = depth_conditioned_coords.interp_img(img_feats[img_ind], torch.Tensor(anchor_uv_t)).T.cuda()
+    pixel_feats = depth_conditioned_coords.interp_img(
+        img_feats[img_ind], torch.Tensor(anchor_uv_t)
+    ).T.cuda()
     pixel_feats = pixel_feats[:, None].repeat(1, query_xyz.shape[1], 1)
-    
+
     for i in range(len(anchor_uv)):
 
         cur_query_xyz = query_xyz[visible_pt_inds[i]]
@@ -243,17 +250,15 @@ for im_id in tqdm.tqdm(im_ids[1:]):
         anchor_xyz_rotated = np.linalg.inv(cam2anchor_rot[i]) @ anchor_xyz_cam[i]
         query_coords = (query_xyz_rotated - anchor_xyz_rotated) / 0.2
         query_coords = torch.Tensor(query_coords).cuda()
-    
+
         logits = model["mlp"](query_coords[None], pixel_feats[i])
-    
+
         preds = torch.sigmoid(logits)[0, ..., 0].cpu().numpy()
-    
+
         pred_vol[
             cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
         ] += preds
-        count_vol[
-            cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]
-        ] += 1
+        count_vol[cur_query_inds[:, 0], cur_query_inds[:, 1], cur_query_inds[:, 2]] += 1
 
 mean_pred_vol = np.zeros_like(pred_vol)
 inds = count_vol > 2
