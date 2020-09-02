@@ -107,10 +107,13 @@ class MLP(torch.nn.Module):
         )
 
         self.offsetter = torch.nn.Sequential(
-            res_block(512),
-            res_block(512),
-            res_block(512),
-            torch.nn.Linear(512, 512, bias=False)
+            torch.nn.Linear(512, 512, bias=False),
+            bn_relu_fc(512, 1024),
+            bn_relu_fc(1024, 1024),
+            bn_relu_fc(1024, 1024),
+            bn_relu_fc(1024, 1024),
+            bn_relu_fc(1024, 1024),
+            bn_relu_fc(1024, 512),
         )
 
         self.classifier = torch.nn.Sequential(

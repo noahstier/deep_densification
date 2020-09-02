@@ -23,22 +23,12 @@ def bn_relu_conv(in_channels, out_channels, ksize=3):
 class FPN(torch.nn.Module):
     def __init__(self, input_height, input_width, n_classes):
         super().__init__()
-        # self.fpn = torchvision.models.detection.backbone_utils.resnet_fpn_backbone(
-        #     "resnet50", pretrained=False
-        # )
-        # self.fpn.requires_grad_(False)
+        backbone = torchvision.models.detection.backbone_utils.resnet.resnet50(pretrained=True, norm_layer=torch.nn.BatchNorm2d)
 
-        backbone = torchvision.models.detection.backbone_utils.resnet.resnet50(
-            pretrained=True
-        )
-        return_layers = {"layer1": 0, "layer2": 1, "layer3": 2, "layer4": 3}
-
-        """
-        todo -- train some backbone layers?
-        """
         backbone.requires_grad_(False)
         backbone.layer4.requires_grad_(True)
 
+        return_layers = {'layer1': 0, 'layer2': 1, 'layer3': 2, 'layer4': 3}
         in_channels_stage2 = backbone.inplanes // 8
         in_channels_list = [
             in_channels_stage2,
@@ -46,10 +36,9 @@ class FPN(torch.nn.Module):
             in_channels_stage2 * 4,
             in_channels_stage2 * 8,
         ]
-        out_channels = 512
-        self.fpn = torchvision.models.detection.backbone_utils.BackboneWithFPN(
-            backbone, return_layers, in_channels_list, out_channels
-        )
+        out_channels = 256
+        self.fpn = torchvision.models.detection.backbone_utils.BackboneWithFPN(backbone, return_layers, in_channels_list, out_channels)
+
 
         test_img = torch.zeros((1, 3, input_height, input_width))
         fpn_features = self.fpn(test_img)
@@ -59,18 +48,18 @@ class FPN(torch.nn.Module):
         self.scale_heads = torch.nn.ModuleList(
             [
                 torch.nn.Sequential(
-                    bn_relu_conv(512, 256),
+                    bn_relu_conv(256, 256),
                     torch.nn.Conv2d(256, 256, 3, padding=1, bias=False),
                     torch.nn.BatchNorm2d(256),
                 ),
                 torch.nn.Sequential(
-                    bn_relu_conv(512, 256),
+                    bn_relu_conv(256, 256),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
                     torch.nn.Conv2d(256, 256, 3, padding=1, bias=False),
                     torch.nn.BatchNorm2d(256),
                 ),
                 torch.nn.Sequential(
-                    bn_relu_conv(512, 256),
+                    bn_relu_conv(256, 256),
                     torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
                     bn_relu_conv(256, 256),
                     torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
@@ -78,7 +67,7 @@ class FPN(torch.nn.Module):
                     torch.nn.BatchNorm2d(256),
                 ),
                 torch.nn.Sequential(
-                    bn_relu_conv(512, 256),
+                    bn_relu_conv(256, 256),
                     torch.nn.Upsample(dims[2], mode="bilinear", align_corners=False),
                     bn_relu_conv(256, 256),
                     torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
@@ -98,7 +87,7 @@ class FPN(torch.nn.Module):
         )
 
         # self.classifier = torch.nn.Sequential(
-        #     torch.nn.Conv2d(128, n_classes, 1, bias=False),
+        #     torch.nn.Conv2d(256, n_classes, 1, bias=False),
         #     torch.nn.Upsample(
         #         (input_height, input_width), mode="bilinear", align_corners=False
         #     ),

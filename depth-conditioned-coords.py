@@ -76,22 +76,28 @@ class MLP(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.coord_encoder = torch.nn.Sequential(
-            torch.nn.Linear(3, 32),
+            torch.nn.Linear(3, 32, bias=False),
             bn_relu_fc(32, 32),
             bn_relu_fc(32, 64),
             bn_relu_fc(64, 128),
+            bn_relu_fc(128, 256),
+            torch.nn.BatchNorm1d(256),
+            torch.nn.ReLU()
         )
 
         self.offsetter = torch.nn.Sequential(
-            bn_relu_fc(256, 256),
-            bn_relu_fc(256, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
+            torch.nn.Linear(512, 512, bias=False),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
         )
 
         self.classifier = torch.nn.Sequential(
-            bn_relu_fc(128, 128),
+            bn_relu_fc(512, 256),
+            bn_relu_fc(256, 128),
             bn_relu_fc(128, 64),
             bn_relu_fc(64, 32),
             bn_relu_fc(32, 16),
@@ -100,11 +106,12 @@ class MLP(torch.nn.Module):
 
     def forward(self, coords, feats):
         shape = coords.shape[:-1]
-        coords = coords.reshape(np.prod([i for i in shape]), coords.shape[-1])
-        feats = feats.reshape(np.prod([i for i in shape]), feats.shape[-1])
+        coords = coords.reshape(np.prod(list(shape)), coords.shape[-1])
+        feats = feats.reshape(np.prod(list(shape)), feats.shape[-1])
 
         encoded_coords = self.coord_encoder(coords)
-        offset = self.offsetter(torch.cat((encoded_coords, feats), dim=-1)) + feats
+
+        offset = self.offsetter(torch.cat((encoded_coords, feats), dim=-1))
         logits = self.classifier(offset)
         logits = logits.reshape(*shape, -1)
         return logits
@@ -144,8 +151,43 @@ def interp_img(img, xy):
 if config.wandb:
     wandb.init(project="deepmvs")
 
+house_dirs = sorted(
+    [
+        d
+        for d in glob.glob(os.path.join(config.dset_dir, "*"))
+        if os.path.exists(os.path.join(d, "fusion.npz"))
+        and os.path.exists(os.path.join(d, "poses.npz"))
+    ]
+)
+
+"""
+"""
+with open("per_img_classes.pkl", "rb") as f:
+    per_img_classes = pickle.load(f)
+"""
+"""
+
+included_classes = [5, 11, 20, 67, 72]
+test_house_dirs = house_dirs[:10]
+train_house_dirs = house_dirs[10:]
+dset = depth_loader.Dataset(
+    train_house_dirs,
+    per_img_classes,
+    included_classes,
+    n_anchors=config.n_anchors,
+    n_queries_per_anchor=config.n_queries_per_anchor,
+)
+loader = torch.utils.data.DataLoader(
+    dset,
+    batch_size=config.img_batch_size,
+    shuffle=True,
+    num_workers=8,
+    drop_last=True,
+    pin_memory=True,
+)
+
 input_height, input_width = fpn.transform(
-    PIL.Image.fromarray(np.zeros((480, 640, 3), dtype=np.uint8))
+    PIL.Image.fromarray(dset[0][-4])
 ).shape[1:]
 
 model = torch.nn.ModuleDict(
@@ -182,41 +224,6 @@ if False:
 
 if config.wandb:
     wandb.watch(model)
-
-house_dirs = sorted(
-    [
-        d
-        for d in glob.glob(os.path.join(config.dset_dir, "*"))
-        if os.path.exists(os.path.join(d, "fusion.npz"))
-        and os.path.exists(os.path.join(d, "poses.npz"))
-    ]
-)
-
-"""
-"""
-with open("per_img_classes.pkl", "rb") as f:
-    per_img_classes = pickle.load(f)
-"""
-"""
-
-included_classes = [5, 11, 20, 67, 72]
-test_house_dirs = house_dirs[:10]
-train_house_dirs = house_dirs[10:]
-dset = depth_loader.Dataset(
-    train_house_dirs,
-    per_img_classes,
-    list(range(91)),
-    n_anchors=config.n_anchors,
-    n_queries_per_anchor=config.n_queries_per_anchor,
-)
-loader = torch.utils.data.DataLoader(
-    dset,
-    batch_size=config.img_batch_size,
-    shuffle=True,
-    num_workers=8,
-    drop_last=True,
-    pin_memory=True,
-)
 
 occ_loss_fn = torch.nn.BCELoss(reduction="none").cuda()
 
@@ -255,7 +262,7 @@ for epoch in range(10_000):
 
         optimizer.zero_grad()
 
-        img_feats, _ = model["cnn"](rgb_img_t)
+        img_feats, _, _ = model["cnn"](rgb_img_t)
         img_feats = torch.nn.functional.interpolate(
             img_feats, size=(rgb_img_t.shape[2:]), mode="bilinear", align_corners=False
         )
