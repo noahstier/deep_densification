@@ -107,8 +107,8 @@ class MLP(torch.nn.Module):
         )
 
         self.offsetter = torch.nn.Sequential(
-            torch.nn.Linear(256, 256, bias=False),
-            bn_relu_fc(256, 256),
+            torch.nn.Linear(384, 384, bias=False),
+            bn_relu_fc(384, 256),
             bn_relu_fc(256, 128),
             bn_relu_fc(128, 128),
             bn_relu_fc(128, 128),
@@ -147,6 +147,8 @@ class Dataset(torch.utils.data.Dataset):
         self.poses = np.load(os.path.join(self.dsetdir, "poses.npy"))
         self.intrinsic = np.load(os.path.join(self.dsetdir, "intrinsic.npy"))
         self.inv_intrinsic = np.linalg.inv(self.intrinsic)
+
+        self.rotinds = np.load(os.path.join(self.dsetdir, "rotinds.npy"))
 
         query_npz = np.load(os.path.join(self.dsetdir, "sdf.npz"))
         self.query_pts = query_npz["pts"]
@@ -375,6 +377,7 @@ class Dataset(torch.utils.data.Dataset):
             pose,
             cam2anchor_rot,
             index,
+            self.rotinds[index],
         )
 
 
@@ -406,7 +409,26 @@ if __name__ == "__main__":
     input_height, input_width = fpn.transform(PIL.Image.fromarray(dset[0][0])).shape[1:]
 
     model = torch.nn.ModuleDict(
-        {"cnn": fpn.FPN(input_height, input_width, 1), "mlp": MLP(),}
+        {
+            "cnn": fpn.FPN(input_height, input_width, 1),
+            "mlp": MLP(),
+            "rot_encoder": torch.nn.Sequential(
+                bn_relu_fc(42, 64),
+                bn_relu_fc(64, 128),
+                bn_relu_fc(128, 128),
+                bn_relu_fc(128, 128),
+                bn_relu_fc(128, 128),
+                torch.nn.BatchNorm1d(128),
+                torch.nn.ReLU()
+            ),
+            # "rot_class": torch.nn.Sequential(
+            #     bn_relu_fc(128, 128),
+            #     bn_relu_fc(128, 128),
+            #     bn_relu_fc(128, 128),
+            #     bn_relu_fc(128, 64),
+            #     bn_relu_fc(64, 42),
+            # ),
+        }
     ).cuda()
 
     if False:
@@ -423,10 +445,13 @@ if __name__ == "__main__":
         [
             {"params": model["cnn"].parameters(), "lr": 1e-4},
             {"params": model["mlp"].parameters(), "lr": 1e-3},
+            # {"params": model["rot_class"].parameters(), "lr": 1e-3},
+            {"params": model["rot_encoder"].parameters(), "lr": 1e-3},
         ]
     )
 
     bce = torch.nn.BCEWithLogitsLoss()
+    ce = torch.nn.CrossEntropyLoss().cuda()
 
     step = 0
     for epoch in range(1000):
@@ -448,6 +473,7 @@ if __name__ == "__main__":
                 pose,
                 cam2anchor_rot,
                 index,
+                rotind,
             ) = batch
             assert rgb_img.shape[0] == batch_size
 
@@ -484,8 +510,13 @@ if __name__ == "__main__":
             query_coords = query_coords.cuda()
             # query_occ = query_occ.cuda().float()
             query_sd = query_sd.cuda().float()
+            rotind = rotind.cuda().long()
 
             opt.zero_grad()
+
+            rot_feats = model['rot_encoder'](torch.nn.functional.one_hot(rotind, num_classes=42).float())
+            rot_feats = rot_feats[:, None, None].repeat(1, dset.n_anchors, dset.n_uniform, 1)
+
 
             # if np.any([torch.any(torch.isnan(a)) for a in model['cnn'].parameters()]):
             #     raise Exception('gah')
@@ -521,11 +552,18 @@ if __name__ == "__main__":
             for i in range(len(img_feats)):
                 pixel_feats.append(interp_img(img_feats[i], anchor_uv_t[i]).T)
             pixel_feats = torch.stack(pixel_feats, dim=0)
+
+            # rotind = rotind[:, None].repeat(1, pixel_feats.shape[1]).reshape(-1)
+            # rot_logits = model['rot_class'](pixel_feats.reshape(-1, pixel_feats.shape[-1]))
+            # rot_loss = ce(rot_logits, rotind)
+
+
             pixel_feats = pixel_feats[:, :, None].repeat(
                 (1, 1, query_coords.shape[2], 1)
             )
+            a = torch.cat((pixel_feats, rot_feats), dim=-1)
 
-            logits = model["mlp"](query_coords, pixel_feats)[..., 0]
+            logits = model["mlp"](query_coords, a)[..., 0]
 
             preds = torch.tanh(logits)
 
@@ -537,9 +575,17 @@ if __name__ == "__main__":
             # target = log_transform(query_sd / dset.query_radius)
             # inputs = log_transform(preds)
 
-            loss = torch.abs(target - inputs)
+
+            sd_loss = torch.abs(target - inputs)
             inds = (torch.abs(query_sd) < 0.01).float()
-            loss = torch.sum(loss) / torch.sum(inds)
+            sd_loss = torch.sum(sd_loss) / torch.sum(inds)
+
+            loss = sd_loss
+            # loss = rot_loss + sd_loss
+            # loss = rot_loss
+
+            # rot_acc = torch.mean((torch.argmax(rot_logits, dim=-1) == rotind).float()).item()
+
 
             # loss = bce(logits, query_occ)
             loss.backward()
@@ -567,6 +613,7 @@ if __name__ == "__main__":
                 wandb.log(
                     {
                         "loss": loss.item(),
+                        # "rot_acc": rot_acc,
                         # "pos_loss": pos_loss.item(),
                         # "neg_loss": neg_loss.item(),
                         "precision": precision.item(),

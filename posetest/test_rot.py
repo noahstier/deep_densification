@@ -8,15 +8,41 @@ import trimesh
 import fpn
 
 
-import pose_test_anchor
+import pose_test_anchor_rot
 
 
-dset = pose_test_anchor.Dataset()
+dset = pose_test_anchor_rot.Dataset()
 
 input_height, input_width = fpn.transform(PIL.Image.fromarray(dset[0][0])).shape[1:]
 
 model = torch.nn.ModuleDict(
-    {"cnn": fpn.FPN(input_height, input_width, 1), "mlp": pose_test_anchor.MLP(),}
+    {
+        "cnn": fpn.FPN(input_height, input_width, 1),
+        "mlp": pose_test_anchor_rot.MLP(),
+        # "rot_encoder": torch.nn.Sequential(
+        #     bn_relu_fc(42, 64),
+        #     bn_relu_fc(64, 128),
+        #     bn_relu_fc(128, 128),
+        #     bn_relu_fc(128, 128),
+        #     bn_relu_fc(128, 128),
+        # ),
+        "rot_encoder": torch.nn.Sequential(
+            pose_test_anchor_rot.bn_relu_fc(42, 64),
+            pose_test_anchor_rot.bn_relu_fc(64, 128),
+            pose_test_anchor_rot.bn_relu_fc(128, 128),
+            pose_test_anchor_rot.bn_relu_fc(128, 128),
+            pose_test_anchor_rot.bn_relu_fc(128, 128),
+            torch.nn.BatchNorm1d(128),
+            torch.nn.ReLU()
+        ),
+        # "rot_class": torch.nn.Sequential(
+        #     pose_test_anchor_rot.bn_relu_fc(128, 128),
+        #     pose_test_anchor_rot.bn_relu_fc(128, 128),
+        #     pose_test_anchor_rot.bn_relu_fc(128, 128),
+        #     pose_test_anchor_rot.bn_relu_fc(128, 64),
+        #     pose_test_anchor_rot.bn_relu_fc(64, 42),
+        # ),
+    }
 ).cuda()
 
 checkpoint = torch.load("models/test-625")
@@ -48,6 +74,7 @@ query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
     pose,
     cam2anchor_rot,
     index,
+    rotinds
 ) = dset[0]
 
 j = 1
@@ -102,6 +129,9 @@ xlabel('x')
 ylabel('y')
 """
 
+rot_feats = model['rot_encoder'](torch.nn.functional.one_hot(torch.Tensor([rotinds]).long().cuda(), num_classes=42).float())
+rot_feats = rot_feats[:, None].repeat(1, dset.n_uniform, 1)
+
 rgb_img_t = torch.Tensor(rgb_img_t[None]).cuda()
 query_coords = torch.Tensor(query_coords[None]).float().cuda()
 query_occ = torch.Tensor(query_occ)
@@ -118,10 +148,12 @@ anchor_uv_t = (
     * torch.Tensor([img_feats.shape[3], img_feats.shape[2]])
 ).cuda()
 
-pixel_feats = pose_test_anchor.interp_img(img_feats[0], anchor_uv_t[None]).float().T
+pixel_feats = pose_test_anchor_rot.interp_img(img_feats[0], anchor_uv_t[None]).float().T
 pixel_feats = pixel_feats[None].repeat((1, query_coords.shape[1], 1))
 
-logits = model["mlp"](query_coords, pixel_feats)[0, ..., 0]
+a = torch.cat((pixel_feats, rot_feats), dim=-1)
+
+logits = model["mlp"](query_coords, a)[0, ..., 0]
 # preds = torch.sigmoid(logits)
 preds = torch.tanh(logits)
 
@@ -174,13 +206,17 @@ query_xyz_cam_rotated = anchor_xyz_cam_rotated + query_offsets
 query_xyz_cam = (cam2anchor_rot @ query_xyz_cam_rotated.T).T
 
 query_coords = (query_xyz_cam_rotated - anchor_xyz_cam_rotated) / dset.query_radius
-# query_coords = pose_test_anchor.positional_encoding(query_coords, L=2)
+# query_coords = pose_test_anchor_rot.positional_encoding(query_coords, L=2)
 
 query_coords = torch.Tensor(query_coords[None]).cuda()
-pixel_feats = pose_test_anchor.interp_img(img_feats[0], anchor_uv_t[None]).float().T
+pixel_feats = pose_test_anchor_rot.interp_img(img_feats[0], anchor_uv_t[None]).float().T
 pixel_feats = pixel_feats[None].repeat((1, query_coords.shape[1], 1))
 
-logits = model["mlp"](query_coords, pixel_feats)[0, ..., 0]
+rot_feats = model['rot_encoder'](torch.nn.functional.one_hot(torch.Tensor([rotinds]).long().cuda(), num_classes=42).float())
+rot_feats = rot_feats[:, None].repeat(1, query_coords.shape[1], 1)
+a = torch.cat((pixel_feats, rot_feats), dim=-1)
+
+logits = model["mlp"](query_coords, a)[0, ..., 0]
 
 preds = torch.tanh(logits).cpu().numpy()
 pred_vol = np.reshape(preds, xx.shape)
