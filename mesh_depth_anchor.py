@@ -23,6 +23,8 @@ import fpn
 import config
 import unet
 
+import depth_conditioned_coords
+
 torch.manual_seed(1)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
@@ -34,120 +36,6 @@ spec = importlib.util.spec_from_file_location(
 )
 colmap_reader = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(colmap_reader)
-
-
-class FCLayer(torch.nn.Module):
-    def __init__(self, k_in, k_out=None, use_bn=True):
-        super(FCLayer, self).__init__()
-        if k_out is None:
-            k_out = k_in
-        if k_out == k_in:
-            self.residual = True
-        else:
-            self.residual = False
-
-        self.use_bn = use_bn
-
-        self.fc = torch.nn.Linear(k_in, k_out, bias=not use_bn)
-        if self.use_bn:
-            self.bn = torch.nn.BatchNorm1d(k_out)
-
-    def forward(self, inputs):
-        x = inputs
-        shape = x.shape[:-1]
-
-        x = x.reshape(np.prod([i for i in shape]), x.shape[-1])
-        x = self.fc(x)
-        if self.use_bn:
-            x = self.bn(x)
-        x = torch.relu(x)
-        x = x.reshape(*shape, x.shape[-1])
-        if self.residual:
-            x = x + inputs
-        return x
-
-
-def fc_bn_relu(in_c, out_c):
-    return torch.nn.Sequential(
-        torch.nn.BatchNorm1d(in_c),
-        torch.nn.ReLU(),
-        torch.nn.Linear(in_c, out_c, bias=False),
-    )
-
-
-class MLP(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.coord_encoder = torch.nn.Sequential(
-            torch.nn.Linear(3, 32),
-            fc_bn_relu(32, 32),
-            fc_bn_relu(32, 64),
-            fc_bn_relu(64, 128),
-        )
-
-        self.offsetter = torch.nn.Sequential(
-            fc_bn_relu(256, 256),
-            fc_bn_relu(256, 128),
-            fc_bn_relu(128, 128),
-            fc_bn_relu(128, 128),
-            fc_bn_relu(128, 128),
-        )
-
-        self.classifier = torch.nn.Sequential(
-            fc_bn_relu(128, 128),
-            fc_bn_relu(128, 64),
-            fc_bn_relu(64, 32),
-            fc_bn_relu(32, 16),
-            torch.nn.Linear(16, 1, bias=False),
-        )
-
-    def forward(self, coords, feats):
-        shape = coords.shape[:-1]
-        coords = coords.reshape(np.prod([i for i in shape]), coords.shape[-1])
-        feats = feats.reshape(np.prod([i for i in shape]), feats.shape[-1])
-
-        encoded_coords = self.coord_encoder(coords)
-        offset = self.offsetter(torch.cat((encoded_coords, feats), dim=-1)) + feats
-        logits = self.classifier(offset)
-        logits = logits.reshape(*shape, -1)
-        return logits
-
-
-def interp_img(img, xy):
-    x = xy[:, 0]
-    y = xy[:, 1]
-
-    x0 = torch.floor(x).long()
-    y0 = torch.floor(y).long()
-
-    x1 = torch.clamp_max(x0 + 1, img.shape[2] - 1)
-    y1 = torch.clamp_max(y0 + 1, img.shape[1] - 1)
-
-    assert torch.all(
-        (y0 >= 0) & (y0 <= img.shape[1] - 1) & (x0 >= 0) & (x0 <= img.shape[2] - 1)
-    )
-
-    f_ll = img[:, y0, x0]
-    f_lr = img[:, y0, x1]
-    f_ul = img[:, y1, x0]
-    f_ur = img[:, y1, x1]
-
-    interped = (
-        f_ll * ((x - x0) * (y - y0))
-        + f_lr * ((x1 - x) * (y - y0))
-        + f_ur * ((x1 - x) * (y1 - y))
-        + f_ul * ((x - x0) * (y1 - y))
-    )
-    return interped
-
-
-def positional_encoding(xyz, L):
-    encoding = []
-    for l in range(L):
-        encoding.append(np.sin(2 ** l ** np.pi * xyz))
-        encoding.append(np.cos(2 ** l ** np.pi * xyz))
-    encoding = np.concatenate(encoding, axis=-1)
-    return encoding
 
 
 house_dirs = sorted(
@@ -246,12 +134,12 @@ input_width = imgs_t.shape[3]
 
 model = torch.nn.ModuleDict(
     {
-        "mlp": MLP(),
+        "mlp": depth_conditioned_coords.MLP(),
         "cnn": fpn.FPN(input_height, input_width, 1),
     }
 )
 # model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/5-class-50hour")["model"])
+model.load_state_dict(torch.load("models/all-classes-122690")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -276,6 +164,7 @@ y = np.arange(-0.2, 0.2, res)
 z = np.arange(-0.2, 0.2, res)
 xx, yy, zz = np.meshgrid(x, y, z)
 query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
+query_offset_center = np.array([np.mean(x), np.mean(y), np.mean(z)])
 
 x = np.arange(len(x), dtype=int)
 y = np.arange(len(y), dtype=int)
@@ -349,13 +238,13 @@ query_coords = torch.Tensor(
     (query_xyz_cam_rotated - anchor_xyz_cam_rotated[:, None]) / 0.2
 ).cuda()
 
-img_feat, _ = cnn(imgs_t[None, img_ind])
+img_feat, _, _ = cnn(imgs_t[None, img_ind])
 anchor_uv_t = (
     anchor_uv
     / [depth_img.shape[1], depth_img.shape[0]]
     * [img_feat.shape[3], img_feat.shape[2]]
 )
-pixel_feats = interp_img(img_feat[0], torch.Tensor(anchor_uv_t).cuda()).T
+pixel_feats = depth_conditioned_coords.interp_img(img_feat[0], torch.Tensor(anchor_uv_t).cuda()).T
 
 anchors_per_batch = 24
 for i in tqdm.trange(int(np.ceil(len(anchor_uv) / anchors_per_batch))):
@@ -381,7 +270,7 @@ imshow(imgs[img_ind])
 plot(anchor_uv[:, 0], anchor_uv[:, 1], 'r.')
 
 j = 4
-verts, faces, _, _, = skimage.measure.marching_cubes(pred_vols[j], level=0.5)
+verts, faces, _, _, = skimage.measure.marching_cubes_lewiner(pred_vols[j], level=0.5)
 verts = verts[:, [1, 0, 2]]
 faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
 verts = (verts - np.array(xx.shape) / 2) * res + anchor_xyz_cam_rotated[j]
@@ -406,7 +295,7 @@ o3d.visualization.draw_geometries([gt_pcd, mesh, pos_pcd, neg_pcd])
 
 meshes = []
 for i in range(len(pred_vols)):
-    verts, faces, _, _, = skimage.measure.marching_cubes(pred_vols[i], level=0.5)
+    verts, faces, _, _, = skimage.measure.marching_cubes_lewiner(pred_vols[i], level=0.5)
 
     verts = verts[:, [1, 0, 2]]
     faces = np.concatenate((faces, faces[:, ::-1]), axis=0)
