@@ -54,10 +54,10 @@ def interp_img(img, xy):
     f_ur = img[:, y1, x1]
 
     interped = (
-        f_ll * ((x - x0) * (y - y0))
-        + f_lr * ((x1 - x) * (y - y0))
-        + f_ur * ((x1 - x) * (y1 - y))
-        + f_ul * ((x - x0) * (y1 - y))
+        f_ll * ((x1 - x) * (y1 - y))
+        + f_lr * ((x - x0) * (y1 - y))
+        + f_ur * ((x - x0) * (y - y0))
+        + f_ul * ((x1 - x) * (y - y0))
     )
     return interped
 
@@ -102,24 +102,24 @@ class MLP(torch.nn.Module):
             bn_relu_fc(32, 32),
             bn_relu_fc(32, 64),
             bn_relu_fc(64, 128),
-            torch.nn.BatchNorm1d(128),
+            bn_relu_fc(128, 256),
+            torch.nn.BatchNorm1d(256),
             torch.nn.ReLU(),
         )
 
         self.offsetter = torch.nn.Sequential(
-            torch.nn.Linear(384, 384, bias=False),
-            bn_relu_fc(384, 256),
-            bn_relu_fc(256, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
+            torch.nn.Linear(896, 512, bias=False),
+            bn_relu_fc(512, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
         )
 
         self.classifier = torch.nn.Sequential(
-            bn_relu_fc(128, 64),
-            bn_relu_fc(64, 32),
-            bn_relu_fc(32, 16),
+            bn_relu_fc(256, 64),
+            bn_relu_fc(64, 16),
             bn_relu_fc(16, 1),
         )
 
@@ -577,7 +577,7 @@ if __name__ == "__main__":
 
 
             sd_loss = torch.abs(target - inputs)
-            inds = (torch.abs(query_sd) < 0.01).float()
+            inds = (torch.abs(query_sd) < 0.02).float()
             sd_loss = torch.sum(sd_loss) / torch.sum(inds)
 
             loss = sd_loss

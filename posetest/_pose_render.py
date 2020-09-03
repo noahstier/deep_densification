@@ -79,10 +79,12 @@ np.save("dset/intrinsic.npy", intrinsic)
 poses = []
 rotinds = []
 for i in tqdm.trange(n):
-    depth = np.random.uniform(1, 4)
-    mesh_center_uv = np.array(
-        [np.random.uniform(0.1 * w, w * 0.9), np.random.uniform(0.1 * h, h * 0.9),]
-    )
+    # depth = np.random.uniform(1, 4)
+    # mesh_center_uv = np.array(
+    #     [np.random.uniform(0.1 * w, w * 0.9), np.random.uniform(0.1 * h, h * 0.9),]
+    # )
+    depth = 2.0
+    mesh_center_uv = np.array([.5 * w, .5 * h])
     mesh_center_xyz = (np.linalg.inv(intrinsic) @ [*mesh_center_uv, 1]) * -depth
 
     # facingaway = i % 2 == 0
@@ -125,7 +127,8 @@ for i in tqdm.trange(n):
     r1[:3, :3] = rotations[rotind]
     t[:3, 3] = mesh_center_xyz
 
-    pose = t @ r1 @ r2
+    # pose = t @ r1 @ r2
+    pose = t @ r1
 
     fuze_trimesh.vertices = (pose @ normed_verts_h).T[:, :3]
     mesh = pyrender.Mesh.from_trimesh(fuze_trimesh)

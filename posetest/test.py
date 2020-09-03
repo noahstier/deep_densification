@@ -19,7 +19,7 @@ model = torch.nn.ModuleDict(
     {"cnn": fpn.FPN(input_height, input_width, 1), "mlp": pose_test_anchor.MLP(),}
 ).cuda()
 
-checkpoint = torch.load("models/test-625")
+checkpoint = torch.load("models/test-1250")
 model.load_state_dict(checkpoint["model"])
 model.eval()
 model.requires_grad_(False)
@@ -48,7 +48,7 @@ query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
     pose,
     cam2anchor_rot,
     index,
-) = dset[0]
+) = dset[1]
 
 j = 1
 anchor_uv = anchor_uv[j]
@@ -292,8 +292,8 @@ mesh.compute_vertex_normals()
 mesh.compute_triangle_normals()
 
 # geoms = [fuze_mesh, query_pcd, axes, cam_mesh, mesh]
-# geoms = [fuze_mesh, query_pcd, mesh]
-geoms = [fuze_mesh, correct_pcd, mesh]
+geoms = [fuze_mesh, query_pcd, mesh]
+# geoms = [fuze_mesh, correct_pcd, mesh]
 visibility = [True] * len(geoms)
 
 

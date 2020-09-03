@@ -54,10 +54,10 @@ def interp_img(img, xy):
     f_ur = img[:, y1, x1]
 
     interped = (
-        f_ll * ((x - x0) * (y - y0))
-        + f_lr * ((x1 - x) * (y - y0))
-        + f_ur * ((x1 - x) * (y1 - y))
-        + f_ul * ((x - x0) * (y1 - y))
+        f_ll * ((x1 - x) * (y1 - y))
+        + f_lr * ((x - x0) * (y1 - y))
+        + f_ur * ((x - x0) * (y - y0))
+        + f_ul * ((x1 - x) * (y - y0))
     )
     return interped
 
@@ -75,6 +75,12 @@ def bn_relu_fc(in_c, out_c):
     return torch.nn.Sequential(
         torch.nn.BatchNorm1d(in_c),
         torch.nn.ReLU(),
+        torch.nn.Linear(in_c, out_c, bias=False),
+    )
+
+def elu_fc(in_c, out_c):
+    return torch.nn.Sequential(
+        torch.nn.ELU(),
         torch.nn.Linear(in_c, out_c, bias=False),
     )
 
@@ -102,24 +108,19 @@ class MLP(torch.nn.Module):
             bn_relu_fc(32, 32),
             bn_relu_fc(32, 64),
             bn_relu_fc(64, 128),
-            torch.nn.BatchNorm1d(128),
-            torch.nn.ReLU(),
-        )
-
-        self.offsetter = torch.nn.Sequential(
-            torch.nn.Linear(256, 256, bias=False),
-            bn_relu_fc(256, 256),
-            bn_relu_fc(256, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
-            bn_relu_fc(128, 128),
+            bn_relu_fc(128, 256),
         )
 
         self.classifier = torch.nn.Sequential(
-            bn_relu_fc(128, 64),
-            bn_relu_fc(64, 32),
-            bn_relu_fc(32, 16),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 256),
+            bn_relu_fc(256, 64),
+            bn_relu_fc(64, 16),
             bn_relu_fc(16, 1),
         )
 
@@ -130,15 +131,14 @@ class MLP(torch.nn.Module):
 
         encoded_coords = self.coord_encoder(coords)
 
-        offset = self.offsetter(torch.cat((encoded_coords, feats), dim=-1))
-        logits = self.classifier(offset)
+        logits = self.classifier(torch.cat((encoded_coords, feats), dim=-1))
         logits = logits.reshape(*shape, -1)
         return logits
 
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self):
-        self.dsetdir = "dset-quant-42"
+        self.dsetdir = "dset-background"
 
         self.rgb_imgfiles = sorted(glob.glob(os.path.join(self.dsetdir, "rgb/*.jpg")))
         self.depth_imgfiles = sorted(
@@ -200,10 +200,7 @@ class Dataset(torch.utils.data.Dataset):
         inds = np.arange(len(uv))
         anchor_inds = uv[np.random.choice(inds, size=self.n_anchors, replace=False)]
 
-        """
-        todo
-        """
-        anchor_uv = anchor_inds + 0.5
+        anchor_uv = anchor_inds
         anchor_range = depth_img[anchor_inds[:, 1], anchor_inds[:, 0]]
         anchor_xyz_cam = (
             (self.inv_intrinsic @ np.c_[anchor_uv, np.ones(len(anchor_uv))].T)
@@ -294,7 +291,7 @@ class Dataset(torch.utils.data.Dataset):
         todo
         """
 
-        """
+        '''
         cross = np.cross(center_pixel_u, anchor_cam_unit)
         cross /= np.linalg.norm(cross, axis=-1, keepdims=True)
         dot = np.dot(center_pixel_u, anchor_cam_unit.T)
@@ -303,7 +300,7 @@ class Dataset(torch.utils.data.Dataset):
             return self[np.random.randint(0, len(self))]
         angle = np.arccos(dot) 
         cam2anchor_rot = scipy.spatial.transform.Rotation.from_rotvec(axis * angle[:, None]).as_matrix()
-        """
+        '''
 
         query_xyz_cam_rotated = np.stack(
             [
@@ -497,9 +494,6 @@ if __name__ == "__main__":
             # if torch.any(torch.isnan(img_feats)):
             #     raise Exception('gah')
 
-            featmeans = np.array(
-                [torch.mean(fpn_features[i].detach()).item() for i in range(4)]
-            )
             img_feats = torch.nn.functional.interpolate(
                 img_feats,
                 size=(rgb_img_t.shape[2:]),
@@ -538,8 +532,9 @@ if __name__ == "__main__":
             # inputs = log_transform(preds)
 
             loss = torch.abs(target - inputs)
-            inds = (torch.abs(query_sd) < 0.01).float()
-            loss = torch.sum(loss) / torch.sum(inds)
+            # inds = (torch.abs(query_sd) < 0.01).float()
+            # loss = torch.sum(loss) / torch.sum(inds)
+            loss = torch.norm(torch.mean(loss, dim=-1), dim=(0, 1))
 
             # loss = bce(logits, query_occ)
             loss.backward()
@@ -571,7 +566,6 @@ if __name__ == "__main__":
                         # "neg_loss": neg_loss.item(),
                         "precision": precision.item(),
                         "recall": recall.item(),
-                        **{"featmean {}".format(i): featmeans[i] for i in range(4)}
                         # "logits": wandb.Histogram(logits.detach().cpu().numpy()),
                         # "preds": wandb.Histogram(preds.detach().cpu().numpy()),
                         # "occ": wandb.Histogram(query_occ.cpu().numpy()),
