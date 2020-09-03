@@ -89,10 +89,10 @@ def interp_img(img, xy):
     f_ur = img[:, y1, x1]
 
     interped = (
-        f_ll * ((x - x0) * (y - y0))
-        + f_lr * ((x1 - x) * (y - y0))
-        + f_ur * ((x1 - x) * (y1 - y))
-        + f_ul * ((x - x0) * (y1 - y))
+        f_ll * ((x1 - x) * (y1 - y))
+        + f_lr * ((x - x0) * (y1 - y))
+        + f_ur * ((x - x0) * (y - y0))
+        + f_ul * ((x1 - x) * (y - y0))
     )
     return interped
 
