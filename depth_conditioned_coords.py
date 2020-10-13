@@ -28,43 +28,29 @@ def focal_loss(inputs, targets, gamma):
     return loss
 
 
-class FCLayer(torch.nn.Module):
-    def __init__(self, k_in, k_out=None, use_bn=True):
-        super(FCLayer, self).__init__()
-        if k_out is None:
-            k_out = k_in
-        if k_out == k_in:
-            self.residual = True
-        else:
-            self.residual = False
-
-        self.use_bn = use_bn
-
-        self.fc = torch.nn.Linear(k_in, k_out, bias=not use_bn)
-        if self.use_bn:
-            self.bn = torch.nn.BatchNorm1d(k_out)
-
-    def forward(self, inputs):
-        x = inputs
-        shape = x.shape[:-1]
-
-        x = x.reshape(np.prod([i for i in shape]), x.shape[-1])
-        x = self.fc(x)
-        if self.use_bn:
-            x = self.bn(x)
-        x = torch.relu(x)
-        x = x.reshape(*shape, x.shape[-1])
-        if self.residual:
-            x = x + inputs
-        return x
-
-
 def bn_relu_fc(in_c, out_c):
     return torch.nn.Sequential(
         torch.nn.BatchNorm1d(in_c),
         torch.nn.ReLU(),
         torch.nn.Linear(in_c, out_c, bias=False),
     )
+
+
+class Pointnet(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(3, 32, bias=False),
+            bn_relu_fc(32, 64),
+            bn_relu_fc(64, 128),
+            bn_relu_fc(128, 256),
+            bn_relu_fc(256, 256),
+        )
+
+    def forward(self, pts):
+        shape = pts.shape[:-1]
+        pts = pts.reshape(np.prod(list(shape)), pts.shape[-1])
+        return self.mlp(pts).reshape(*shape, -1)
 
 
 class MLP(torch.nn.Module):
@@ -75,26 +61,19 @@ class MLP(torch.nn.Module):
             bn_relu_fc(32, 32),
             bn_relu_fc(32, 64),
             bn_relu_fc(64, 128),
-            torch.nn.BatchNorm1d(128),
-            torch.nn.ReLU(),
-        )
-
-        self.offsetter = torch.nn.Sequential(
-            torch.nn.Linear(256, 256, bias=False),
-            bn_relu_fc(256, 256),
-            bn_relu_fc(256, 256),
-            bn_relu_fc(256, 256),
-            bn_relu_fc(256, 256),
-            bn_relu_fc(256, 256),
-            bn_relu_fc(256, 256),
+            bn_relu_fc(128, 256),
         )
 
         self.classifier = torch.nn.Sequential(
-            bn_relu_fc(256, 128),
-            bn_relu_fc(128, 64),
-            bn_relu_fc(64, 32),
-            bn_relu_fc(32, 16),
-            bn_relu_fc(16, 1),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 512),
+            bn_relu_fc(512, 128),
+            bn_relu_fc(128, 32),
+            bn_relu_fc(32, 1),
         )
 
     def forward(self, coords, feats):
@@ -104,8 +83,7 @@ class MLP(torch.nn.Module):
 
         encoded_coords = self.coord_encoder(coords)
 
-        offset = self.offsetter(torch.cat((encoded_coords, feats), dim=-1))
-        logits = self.classifier(offset)
+        logits = self.classifier(torch.cat((encoded_coords, feats), dim=-1))
         logits = logits.reshape(*shape, -1)
         return logits
 
@@ -163,7 +141,8 @@ if __name__ == "__main__":
     """
     """
 
-    included_classes = [5, 11, 20, 67, 72]
+    # included_classes = [5, 11, 20, 67, 72]
+    included_classes = [11]
     test_house_dirs = house_dirs[:10]
     train_house_dirs = house_dirs[10:]
     dset = depth_loader.Dataset(
@@ -177,7 +156,7 @@ if __name__ == "__main__":
         dset,
         batch_size=config.img_batch_size,
         shuffle=True,
-        num_workers=8,
+        num_workers=6,
         drop_last=True,
         pin_memory=True,
     )
@@ -190,27 +169,17 @@ if __name__ == "__main__":
         {
             "cnn": fpn.FPN(input_height, input_width, 1),
             "mlp": MLP(),
-            # "query_encoder": torch.nn.Sequential(
-            #     FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
-            # ),
-            # "mlp": torch.nn.Sequential(
-            #     FCLayer(256),
-            #     FCLayer(256, 512),
-            #     FCLayer(512, 1024),
-            #     FCLayer(1024),
-            #     FCLayer(1024),
-            #     FCLayer(1024, 512),
-            #     FCLayer(512, 256),
-            #     FCLayer(256, 64),
-            #     FCLayer(64, 16),
-            #     torch.nn.Linear(16, 1),
-            # ),
-            # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
-            # "cnn": unet.UNet(n_channels=3),
+            "pointnet": Pointnet(),
         }
     ).cuda()
 
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = torch.optim.Adam(
+        [
+            {"params": model["cnn"].parameters(), "lr": 1e-4},
+            {"params": model["mlp"].parameters(), "lr": 1e-3},
+            {"params": model["pointnet"].parameters(), "lr": 1e-3},
+        ]
+    )
 
     if False:
         checkpoint = torch.load("models/5-class-128pt")
@@ -236,6 +205,7 @@ if __name__ == "__main__":
                 query_uv_t,
                 query_xyz,
                 query_xyz_cam,
+                near_sfm_coords,
                 anchor_uv,
                 anchor_uv_t,
                 anchor_xyz_cam,
@@ -247,24 +217,18 @@ if __name__ == "__main__":
                 intrinsic,
             ) = batch
 
-            if len(query_coords) < config.img_batch_size:
-                raise Exception("gah")
-
             rgb_img_t = rgb_img_t.cuda()
             query_coords = query_coords.cuda()
             query_tsdf = query_tsdf.float().cuda()
             query_uv_t = query_uv_t.cuda()
             query_occ = (query_tsdf <= 0).float()
+            near_sfm_coords = near_sfm_coords.float().cuda()
 
             optimizer.zero_grad()
 
-            img_feats, _, _ = model["cnn"](rgb_img_t)
-            img_feats = torch.nn.functional.interpolate(
-                img_feats,
-                size=(rgb_img_t.shape[2:]),
-                mode="bilinear",
-                align_corners=False,
-            )
+            # pointnet_feats = torch.max(model['pointnet'](near_sfm_coords), dim=2)[0]
+
+            img_feats = model["cnn"](rgb_img_t)
 
             anchor_uv_t_t = (
                 anchor_uv_t
@@ -276,11 +240,14 @@ if __name__ == "__main__":
             for i in range(len(img_feats)):
                 pixel_feats.append(interp_img(img_feats[i], anchor_uv_t_t[i]).T)
             pixel_feats = torch.stack(pixel_feats, dim=0).float()
-            pixel_feats = pixel_feats[:, :, None].repeat(
+
+            # anchor_feats = torch.cat((pixel_feats, regional_feats, neighborhood_feats), dim=-1)
+            anchor_feats = pixel_feats
+            anchor_feats = anchor_feats[:, :, None].repeat(
                 (1, 1, query_coords.shape[2], 1)
             )
 
-            logits = model["mlp"](query_coords, pixel_feats)[..., 0]
+            logits = model["mlp"](query_coords, anchor_feats)[..., 0]
 
             preds = torch.sigmoid(logits)
 

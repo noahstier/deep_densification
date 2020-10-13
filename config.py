@@ -15,7 +15,7 @@ pt_batch_size = 256
 gamma = 2
 
 
-n_anchors = 32
-n_queries_per_anchor = 128
+n_anchors = 2
+n_queries_per_anchor = 2
 
 wandb = False

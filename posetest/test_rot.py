@@ -33,7 +33,7 @@ model = torch.nn.ModuleDict(
             pose_test_anchor_rot.bn_relu_fc(128, 128),
             pose_test_anchor_rot.bn_relu_fc(128, 128),
             torch.nn.BatchNorm1d(128),
-            torch.nn.ReLU()
+            torch.nn.ReLU(),
         ),
         # "rot_class": torch.nn.Sequential(
         #     pose_test_anchor_rot.bn_relu_fc(128, 128),
@@ -74,7 +74,7 @@ query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
     pose,
     cam2anchor_rot,
     index,
-    rotinds
+    rotinds,
 ) = dset[0]
 
 j = 1
@@ -129,7 +129,11 @@ xlabel('x')
 ylabel('y')
 """
 
-rot_feats = model['rot_encoder'](torch.nn.functional.one_hot(torch.Tensor([rotinds]).long().cuda(), num_classes=42).float())
+rot_feats = model["rot_encoder"](
+    torch.nn.functional.one_hot(
+        torch.Tensor([rotinds]).long().cuda(), num_classes=42
+    ).float()
+)
 rot_feats = rot_feats[:, None].repeat(1, dset.n_uniform, 1)
 
 rgb_img_t = torch.Tensor(rgb_img_t[None]).cuda()
@@ -212,7 +216,11 @@ query_coords = torch.Tensor(query_coords[None]).cuda()
 pixel_feats = pose_test_anchor_rot.interp_img(img_feats[0], anchor_uv_t[None]).float().T
 pixel_feats = pixel_feats[None].repeat((1, query_coords.shape[1], 1))
 
-rot_feats = model['rot_encoder'](torch.nn.functional.one_hot(torch.Tensor([rotinds]).long().cuda(), num_classes=42).float())
+rot_feats = model["rot_encoder"](
+    torch.nn.functional.one_hot(
+        torch.Tensor([rotinds]).long().cuda(), num_classes=42
+    ).float()
+)
 rot_feats = rot_feats[:, None].repeat(1, query_coords.shape[1], 1)
 a = torch.cat((pixel_feats, rot_feats), dim=-1)
 

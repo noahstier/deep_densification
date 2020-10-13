@@ -10,14 +10,22 @@ import pyrender
 import matplotlib.pyplot as plt
 import tqdm
 
-n = 10_000
+n = 1_000
 
-fuze_trimesh = trimesh.load("fuze.obj")
+# meshfile = "/home/noah/data/shapenet/02691156/10e4331c34d610dacc14f1e6f4f4f49b/models/model_normalized.obj"
+meshfile = "fuze.obj"
+
+# fuze_trimesh = trimesh.load(meshfile)
+# geoms = list(fuze_trimesh.geometry.values())
+# fuze_trimesh= sum(geoms)
+
+
+fuze_trimesh = trimesh.load(meshfile)
 verts = np.asarray(fuze_trimesh.vertices)
 vertmean = np.mean(verts, axis=0)
 diaglen = np.linalg.norm(np.max(verts, axis=0) - np.min(verts, axis=0))
 normed_verts = (verts - vertmean) / diaglen
-normed_verts_h = np.c_[normed_verts, np.ones(len(normed_verts))].T
+fuze_trimesh.vertices = normed_verts
 
 fx = fy = 585.756
 w = 224
@@ -36,20 +44,12 @@ u /= np.linalg.norm(u)
 axis = np.cross(uvecs, u)
 axis /= np.linalg.norm(axis, axis=-1, keepdims=True)
 angle = np.arccos(np.dot(uvecs, u))
-rotations = scipy.spatial.transform.Rotation.from_rotvec(
+discrete_rotations = scipy.spatial.transform.Rotation.from_rotvec(
     axis * angle[:, None]
 ).as_matrix()
 
-# plot3()
+# gcf().add_subplot(111, projection='3d')
 # plot(uvecs[:, 0], uvecs[:, 1], uvecs[:, 2], '.')
-
-# f = h5py.File("fuze.hdf5", "w")
-# rgb_dset = f.create_dataset("rgb_imgs", (n, h, w, 3), dtype=np.uint8)
-# depth_dset = f.create_dataset("depth_imgs", (n, h, w), dtype=np.uint16)
-# pose_dset = f.create_dataset("pose", (n, 4, 4), dtype=np.float32)
-# intrinsic_dset = f.create_dataset("intrinsic", (3, 3), dtype=np.float32)
-
-# intrinsic_dset[:] = intrinsic
 
 camera_pose = np.eye(4)
 
@@ -61,85 +61,90 @@ forward = -backward
 renderer = pyrender.OffscreenRenderer(w, h)
 scene = pyrender.Scene(bg_color=[0.4, 0.6, 0.6])
 camera = pyrender.IntrinsicsCamera(fx, fy, cx, cy)
-scene.add(camera, pose=camera_pose)
-light = pyrender.SpotLight(
-    color=np.ones(3),
-    intensity=100.0,
-    innerConeAngle=max(fovx, fovy),
-    outerConeAngle=max(fovx, fovy),
-)
-scene.add(light, pose=camera_pose)
+
+mesh = pyrender.Mesh.from_trimesh(fuze_trimesh)
+scene.add(mesh)
+
+light = pyrender.DirectionalLight(color=np.ones(3), intensity=10.0)
+
+# light = pyrender.SpotLight(
+#     color=np.ones(3),
+#     intensity=100.0,
+#     innerConeAngle=max(fovx, fovy),
+#     outerConeAngle=max(fovx, fovy),
+# )
 
 os.mkdir("dset")
 os.mkdir("dset/rgb")
 os.mkdir("dset/depth")
 np.save("dset/intrinsic.npy", intrinsic)
 
+use_discrete_poses = False
+facingaway = False
 
-poses = []
-rotinds = []
+camera_poses = []
+discrete_pose_labels = []
 for i in tqdm.trange(n):
-    # depth = np.random.uniform(1, 4)
-    # mesh_center_uv = np.array(
-    #     [np.random.uniform(0.1 * w, w * 0.9), np.random.uniform(0.1 * h, h * 0.9),]
-    # )
-    depth = 2.0
-    mesh_center_uv = np.array([.5 * w, .5 * h])
-    mesh_center_xyz = (np.linalg.inv(intrinsic) @ [*mesh_center_uv, 1]) * -depth
 
-    # facingaway = i % 2 == 0
+    t_direction = np.random.normal(0, 1, size=3)
+    t_direction /= np.linalg.norm(t_direction, keepdims=True)
+    t_range = np.random.uniform(1, 4)
+    cam_pos = t_direction * t_range
 
-    # if facingaway:
-    #     r1 = np.eye(4)
-    #     r2 = np.eye(4)
-    #     t = np.eye(4)
-
-    #     r1[:3, :3] = scipy.spatial.transform.Rotation.from_rotvec(
-    #         [0, np.pi, 0]
-    #     ).as_matrix()
-
-    #     x = np.random.normal(0, 1, size=5)
-    #     axis = x[:3] / np.linalg.norm(x, axis=-1, keepdims=True)
-    #     axis /= np.linalg.norm(axis)
-    #     angle = np.random.uniform(0, 30) * np.pi / 180
-    #     rotvec = axis * angle
-    #     r2[:3, :3] = scipy.spatial.transform.Rotation.from_rotvec(rotvec).as_matrix()
-    #     t[:3, 3] = mesh_center_xyz
-
-    #     pose = t @ r2 @ r1
-    # else:
-    #     r1 = np.eye(4)
-    #     t = np.eye(4)
-
-    #     r1[:3, :3] = scipy.spatial.transform.Rotation.random().as_matrix()
-    #     t[:3, 3] = mesh_center_xyz
-
-    #     pose = t @ r1
-    r1 = np.eye(4)
-    r2 = np.eye(4)
     t = np.eye(4)
+    t[:3, 3] = cam_pos
 
-    rotind = i % len(rotations)
-    rotinds.append(rotind)
-    r2[:3, :3] = scipy.spatial.transform.Rotation.from_rotvec(
-        np.array([0, 0, 1]) * np.random.uniform(0, 2 * np.pi)
-    ).as_matrix()
-    r1[:3, :3] = rotations[rotind]
-    t[:3, 3] = mesh_center_xyz
+    v = np.random.normal(0, 1, size=3)
+    v /= np.linalg.norm(v, keepdims=True)
 
-    # pose = t @ r1 @ r2
-    pose = t @ r1
+    backward = cam_pos / np.linalg.norm(cam_pos, keepdims=True)
+    forward = -backward
+    right = np.cross(v, forward)
+    right /= np.linalg.norm(right, keepdims=True)
+    up = np.cross(right, forward)
+    up /= np.linalg.norm(up, keepdims=True)
 
-    fuze_trimesh.vertices = (pose @ normed_verts_h).T[:, :3]
-    mesh = pyrender.Mesh.from_trimesh(fuze_trimesh)
+    r1 = np.eye(4)
+    r1[:3, :3] = np.c_[right, up, backward]
 
-    meshnode = scene.add(mesh)
+    rvec = np.random.normal(0, 1, size=3)
+    rvec = rvec / np.linalg.norm(rvec, keepdims=True) * np.random.uniform(0, np.pi / 16)
+    r2 = np.eye(4)
+    r2[:3, :3] = scipy.spatial.transform.Rotation.from_rotvec(rvec).as_matrix()
+
+    camera_pose = t @ r1 @ r2
+
+    """
+    plot3()
+    plot([0], [0], [0], '.')
+    plot([t[0]], [t[1]], [t[2]], '.')
+    plot(
+        [t[0], t[0] + forward[0]], 
+        [t[1], t[1] + forward[1]], 
+        [t[2], t[2] + forward[2]], 
+        'b'
+    )
+    plot(
+        [t[0], t[0] + right[0]], 
+        [t[1], t[1] + right[1]], 
+        [t[2], t[2] + right[2]], 
+        'r'
+    )
+    plot(
+        [t[0], t[0] + up[0]], 
+        [t[1], t[1] + up[1]], 
+        [t[2], t[2] + up[2]], 
+        'g'
+    )
+    xlabel('x')
+    ylabel('y')
+    """
+
+    camera_node = scene.add(camera, pose=camera_pose)
+    light_node = scene.add(light, pose=camera_pose)
     rgb_img, depth_img = renderer.render(scene)
-    scene.remove_node(meshnode)
-
-    # rgb_dset[i] = rgb_img
-    # depth_dset[i] = (depth_img * 1000).astype(np.uint16)
-    # pose_dset[i] = pose
+    scene.remove_node(camera_node)
+    scene.remove_node(light_node)
 
     cv2.imwrite(
         "dset/rgb/{}.jpg".format(str(i).zfill(5)),
@@ -149,7 +154,7 @@ for i in tqdm.trange(n):
         "dset/depth/{}.png".format(str(i).zfill(5)),
         (depth_img * 1000).astype(np.uint16),
     )
-    poses.append(pose)
+    camera_poses.append(camera_pose)
 
     """
     xyz = np.asarray(fuze_trimesh.vertices)
@@ -180,25 +185,33 @@ for i in tqdm.trange(n):
     imshow(proj_depth)
     """
 
-np.save("dset/poses.npy", poses)
-np.save("dset/rotinds.npy", rotinds)
+np.save("dset/camera_poses.npy", camera_poses)
+if use_discrete_poses:
+    np.save("dset/discrete_pose_labels.npy", discrete_pose_labels)
 
-fuze_trimesh.vertices = normed_verts
-query_radius = 0.2
+near_query_pts = fuze_trimesh.sample(195_000)
+near_query_pts += np.random.normal(0, 0.01, size=near_query_pts.shape)
+
+query_radius = 1
 maxnorm = np.max(np.linalg.norm(fuze_trimesh.vertices, axis=-1))
 d = maxnorm + query_radius
-x = np.random.normal(0, 1, size=(200_000, 5))
-query_pts = x[:, :3] / np.linalg.norm(x, axis=-1, keepdims=True) * d
+x = np.random.normal(0, 1, size=(5000, 5))
+far_query_pts = x[:, :3] / np.linalg.norm(x, axis=-1, keepdims=True) * d
+
+query_pts = np.concatenate((near_query_pts, far_query_pts), axis=0)
+
 dist = fuze_trimesh.nearest.signed_distance(query_pts)
 np.savez("dset/sdf.npz", pts=query_pts, sd=dist)
 
 
+"""
 query_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_pts))
 query_pcd.colors = o3d.utility.Vector3dVector(
     plt.cm.jet((dist - np.min(dist)) / (np.max(dist) - np.min(dist)))[:, :3]
 )
-mesh = o3d.io.read_triangle_mesh("fuze.obj")
+mesh = o3d.io.read_triangle_mesh(meshfile)
 v = np.asarray(mesh.vertices)
 v = (v - vertmean) / diaglen
 mesh.vertices = o3d.utility.Vector3dVector(v)
 o3d.visualization.draw_geometries([query_pcd, mesh], mesh_show_back_face=True)
+"""

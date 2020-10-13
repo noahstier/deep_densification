@@ -48,53 +48,33 @@ class FPN(torch.nn.Module):
         dims = [tuple(f.shape[2:]) for f in fpn_features.values()]
         self.dims = dims
 
+        upsample = lambda shape: torch.nn.Upsample(
+            shape, mode="bilinear", align_corners=True
+        )
+
         self.scale_heads = torch.nn.ModuleList(
             [
+                bn_relu_conv(256, 256),
+                torch.nn.Sequential(bn_relu_conv(256, 256), upsample(dims[0]),),
                 torch.nn.Sequential(
-                    bn_relu_conv(256, 128),
-                    torch.nn.Conv2d(128, 128, 3, padding=1, bias=False),
-                    torch.nn.BatchNorm2d(128),
+                    bn_relu_conv(256, 256),
+                    upsample(dims[1]),
+                    bn_relu_conv(256, 256),
+                    upsample(dims[0]),
                 ),
                 torch.nn.Sequential(
-                    bn_relu_conv(256, 128),
-                    torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
-                    torch.nn.Conv2d(128, 128, 3, padding=1, bias=False),
-                    torch.nn.BatchNorm2d(128),
-                ),
-                torch.nn.Sequential(
-                    bn_relu_conv(256, 128),
-                    torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
-                    bn_relu_conv(128, 128),
-                    torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
-                    torch.nn.Conv2d(128, 128, 3, padding=1, bias=False),
-                    torch.nn.BatchNorm2d(128),
-                ),
-                torch.nn.Sequential(
-                    bn_relu_conv(256, 128),
-                    torch.nn.Upsample(dims[2], mode="bilinear", align_corners=False),
-                    bn_relu_conv(128, 128),
-                    torch.nn.Upsample(dims[1], mode="bilinear", align_corners=False),
-                    bn_relu_conv(128, 128),
-                    torch.nn.Upsample(dims[0], mode="bilinear", align_corners=False),
-                    torch.nn.Conv2d(128, 128, 3, padding=1, bias=False),
-                    torch.nn.BatchNorm2d(128),
+                    bn_relu_conv(256, 256),
+                    upsample(dims[2]),
+                    bn_relu_conv(256, 256),
+                    upsample(dims[1]),
+                    bn_relu_conv(256, 256),
+                    upsample(dims[0]),
                 ),
             ]
         )
 
-        self.refiner = torch.nn.Sequential(
-            torch.nn.Conv2d(128, 128, 3, padding=1, bias=False),
-            bn_relu_conv(128, 128),
-            bn_relu_conv(128, 128),
-            torch.nn.BatchNorm2d(128),
-            torch.nn.ReLU(),
-        )
-
-        # self.classifier = torch.nn.Sequential(
-        #     torch.nn.Conv2d(256, n_classes, 1, bias=False),
-        #     torch.nn.Upsample(
-        #         (input_height, input_width), mode="bilinear", align_corners=False
-        #     ),
+        # self.refiner = torch.nn.Sequential(
+        #     bn_relu_conv(131, 128), bn_relu_conv(128, 128),
         # )
 
     def forward(self, imgs):
@@ -102,8 +82,6 @@ class FPN(torch.nn.Module):
         stacked_features = torch.stack(
             [self.scale_heads[i](fpn_features[i]) for i in range(4)], dim=0
         )
-        summed_features = torch.nn.functional.relu(torch.sum(stacked_features, dim=0))
-        combined_features = self.refiner(summed_features)
-        # logits = self.classifier(features)
-        logits = 0
-        return combined_features, logits, fpn_features
+        summed_features = torch.sum(stacked_features, dim=0)
+        return summed_features
+        # return self.refiner(summed_featu)

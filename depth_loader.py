@@ -69,6 +69,8 @@ class Dataset(torch.utils.data.Dataset):
         self.images = []
         self.included_classes = included_classes
 
+        self.query_radius = 0.2
+
         print("initializing dataset")
         for house_dir in tqdm.tqdm(house_dirs):
             rgb_imgdir = os.path.join(house_dir, "imgs/color")
@@ -177,11 +179,11 @@ class Dataset(torch.utils.data.Dataset):
         a = anchor_xyz_cam
         b = query_xyz_cam
         n = self.n_queries_per_anchor
-        thresh = 0.2
+        thresh = self.query_radius
         """
 
         query_inds = take_first_dists_below_thresh(
-            anchor_xyz_cam, query_xyz_cam, self.n_queries_per_anchor, 0.2
+            anchor_xyz_cam, query_xyz_cam, self.n_queries_per_anchor, self.query_radius
         )
 
         good_anchor_inds = ~np.any(query_inds == -1, axis=1)
@@ -235,10 +237,48 @@ class Dataset(torch.utils.data.Dataset):
             axis=0,
         )
 
-        query_coords = (query_xyz_rotated - anchor_xyz_rotated[:, None]) / 0.2
+        query_coords = (
+            query_xyz_rotated - anchor_xyz_rotated[:, None]
+        ) / self.query_radius
         # query_coords = positional_encoding(
-        #     (query_xyz_rotated - anchor_xyz_rotated[:, None]) / 0.2, L=1
+        #     (query_xyz_rotated - anchor_xyz_rotated[:, None]) / self.query_radius, L=1
         # )
+
+        sfm_xyz = np.load(os.path.join(house_dir, "sfm_pts.npy"))
+        anchor_xyz = (
+            extrinsic @ np.c_[anchor_xyz_cam, np.ones(len(anchor_xyz_cam))].T
+        ).T[:, :3]
+        dists = np.linalg.norm(anchor_xyz[:, None] - sfm_xyz[None], axis=-1)
+        in_range_inds = dists < (self.query_radius * 1.5)
+        near_sfm_xyz = [sfm_xyz[in_range_inds[i]] for i in range(len(in_range_inds))]
+
+        near_sfm_xyz_cam = [
+            (
+                np.linalg.inv(extrinsic)
+                @ np.c_[near_sfm_xyz[i], np.ones(len(near_sfm_xyz[i]))].T
+            ).T[:, :3]
+            for i in range(self.n_anchors)
+        ]
+
+        near_sfm_xyz_cam_rotated = [
+            (np.linalg.inv(cam2anchor_rot[i]) @ near_sfm_xyz_cam[i].T).T
+            for i in range(len(near_sfm_xyz_cam))
+        ]
+        near_sfm_coords = [
+            (near_sfm_xyz_cam_rotated[i] - anchor_xyz_rotated[i]) / self.query_radius
+            for i in range(len(near_sfm_xyz_cam))
+        ]
+
+        for i in range(self.n_anchors):
+            xyz = near_sfm_coords[i]
+            if len(xyz) < 256:
+                xyz = np.concatenate((xyz, np.zeros((256 - len(xyz), 3))), axis=0)
+            else:
+                xyz = xyz[
+                    np.random.choice(np.arange(len(xyz)), replace=False, size=256)
+                ]
+            near_sfm_coords[i] = xyz
+        near_sfm_coords = np.stack(near_sfm_coords, axis=0)
 
         pil_img = PIL.Image.open(rgb_imgfile)
         rgb_img = np.asarray(pil_img).copy()
@@ -355,6 +395,7 @@ class Dataset(torch.utils.data.Dataset):
             query_uv_t,
             query_xyz,
             query_xyz_cam,
+            near_sfm_coords,
             anchor_uv,
             anchor_uv_t,
             anchor_xyz_cam,

@@ -16,6 +16,7 @@ import scipy.ndimage
 import skimage.measure
 import torch
 import torchvision
+import trimesh
 import tqdm
 import wandb
 
@@ -49,7 +50,8 @@ house_dirs = sorted(
 test_house_dirs = house_dirs[:10]
 train_house_dirs = house_dirs[10:]
 
-included_classes = [5, 11, 20, 67, 72]
+# included_classes = [5, 11, 20, 67, 72]
+included_classes = [11]
 # included_classes = [67]
 """
 with open("per_img_classes.pkl", "rb") as f:
@@ -66,7 +68,7 @@ tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
 """
 
 house_dir = test_house_dirs[-2]
-img_ind = 409
+img_ind = 79
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
@@ -74,6 +76,10 @@ cat_imgdir = os.path.join(house_dir, "imgs/category")
 fusion_npz = np.load(os.path.join(house_dir, "fusion.npz"))
 sfm_imfile = os.path.join(house_dir, "sfm/sparse/auto/images.bin")
 sfm_ptfile = os.path.join(house_dir, "sfm/sparse/auto/points3D.bin")
+delaunay_meshfile = os.path.join(house_dir, 'sfm/sparse/auto/meshed-delaunay.ply')
+
+delaunay_mesh = o3d.io.read_triangle_mesh(delaunay_meshfile)
+smoothed_mesh = delaunay_mesh.filter_smooth_laplacian()
 
 ims = colmap_reader.read_images_binary(sfm_imfile)
 pts = colmap_reader.read_points3d_binary(sfm_ptfile)
@@ -86,6 +92,7 @@ im_ids = sorted(ims.keys())
 pt_ids = sorted(pts.keys())
 
 sfm_xyz = np.stack([pts[i].xyz for i in pt_ids], axis=0)
+sfm_rgb = np.stack([pts[i].rgb for i in pt_ids], axis=0) / 255
 
 transform = torchvision.transforms.Compose(
     [
@@ -133,41 +140,11 @@ input_width = imgs_t.shape[3]
 
 model = torch.nn.ModuleDict(
     {
-        "cnn": fpn.FPN(input_height, input_width, 1),
         "mlp": depth_conditioned_coords.MLP(),
-        # "query_encoder": torch.nn.Sequential(
-        #     FCLayer(3, 64), FCLayer(64), FCLayer(64), FCLayer(64, 128),
-        # ),
-        # "mlp": torch.nn.Sequential(
-        #    FCLayer(67, 128),
-        #    FCLayer(128, 256),
-        #    FCLayer(256, 512),
-        #    FCLayer(512),
-        #    FCLayer(512),
-        #    FCLayer(512, 256),
-        #    FCLayer(256, 64),
-        #    FCLayer(64, 16),
-        #    torch.nn.Linear(16, 1),
-        # ),
-        # "mlp": torch.nn.Sequential(
-        #     FCLayer(256),
-        #     FCLayer(256, 512),
-        #     FCLayer(512, 1024),
-        #     FCLayer(1024),
-        #     FCLayer(1024),
-        #     FCLayer(1024, 512),
-        #     FCLayer(512, 256),
-        #     FCLayer(256, 64),
-        #     FCLayer(64, 16),
-        #     torch.nn.Linear(16, 1),
-        # ),
-        # "cnn": torchvision.models.mobilenet_v2(pretrained=True).features[:7],
-        # "cnn": unet.UNet(n_channels=3),
         "cnn": fpn.FPN(input_height, input_width, 1),
     }
 )
-# model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/all-classes-122690")["model"])
+model.load_state_dict(torch.load("models/all-classes-1374134")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -196,6 +173,39 @@ visible_inds = (im.point3D_ids != -1) & (np.array([i in pts for i in im.point3D_
 visible_pt_ids = im.point3D_ids[visible_inds]
 visible_pt_uv = im.xys[visible_inds]
 
+dense_pcd = o3d.io.read_point_cloud(os.path.join(house_dir, 'sfm2/dense/0/fused.ply'))
+dense_xyz = np.asarray(dense_pcd.points)
+
+
+cam_pos = camera_extrinsics[img_ind, :3, 3]
+sfm_xyz_cam = (np.linalg.inv(camera_extrinsics[img_ind]) @ np.c_[sfm_xyz, np.ones(len(sfm_xyz))].T).T[:, :3]
+sfm_uv = (camera_intrinsic @ sfm_xyz_cam.T).T
+sfm_uv = sfm_uv[:, :2] / sfm_uv[:, 2:]
+in_frustum_inds = (
+    (sfm_xyz_cam[:, 2] > 0)
+    & (sfm_uv[:, 0] >= 0)
+    & (sfm_uv[:, 0] <= imwidth)
+    & (sfm_uv[:, 1] >= 0)
+    & (sfm_uv[:, 1] <= imheight)
+)
+
+verts = np.asarray(smoothed_mesh.vertices).astype(np.float64)
+faces = np.asarray(smoothed_mesh.triangles).astype(np.int32)
+
+dests = sfm_xyz
+origins = np.tile(cam_pos[None], (len(dests), 1))
+direcs = dests - origins
+intersector = trimesh.ray.ray_triangle.RayMeshIntersector(trimesh.Trimesh(vertices=verts, faces=faces))
+visible_inds = np.zeros(len(dests), dtype=bool)
+for i in tqdm.trange(len(origins)):
+    if in_frustum_inds[i]:
+        locations, ray_idx, tri_idx = intersector.intersects_location(origins[i:i+1], direcs[i:i+1])
+        intersect_dist = np.min(np.linalg.norm(locations - cam_pos, axis=1))
+        pt_dist = np.linalg.norm(cam_pos - dests[i])
+        if intersect_dist + .01 > pt_dist:
+            visible_inds[i] = True
+
+
 if False:
     # depth pixels, all classes
     anchor_inds = np.c_[uu.flatten(), vv.flatten()]
@@ -205,12 +215,16 @@ elif False:
     included_mask = np.sum([(cat_imgs[img_ind] == c) for c in included_classes], axis=0)
     anchor_inds = np.argwhere(included_mask > 0)[:, [1, 0]]
     anchor_inds = anchor_inds[
-        np.random.choice(np.arange(len(anchor_inds)), size=200, replace=False)
+        np.random.choice(np.arange(len(anchor_inds)), size=500, replace=False)
     ]
     anchor_uv = anchor_inds + 0.5
-elif True:
+elif False:
     # SFM points, all classes
     anchor_uv = visible_pt_uv
+    anchor_inds = np.floor(anchor_uv).astype(int)
+elif True:
+    # estimated visible SFM points, all classes
+    anchor_uv = sfm_uv[visible_inds]
     anchor_inds = np.floor(anchor_uv).astype(int)
 
 anchor_xyz_cam = (
@@ -219,6 +233,12 @@ anchor_xyz_cam = (
 anchor_xyz = (
     camera_extrinsics[img_ind] @ np.c_[anchor_xyz_cam, np.ones(len(anchor_xyz_cam))].T
 ).T[:, :3]
+
+
+'''
+anchor_xyz = sfm_xyz[visible_inds]
+anchor_xyz_cam = (np.linalg.inv(camera_extrinsics[img_ind]) @ np.c_[anchor_xyz, np.ones(len(anchor_xyz))].T).T[:, :3]
+'''
 
 anchor_xyz_cam_u = anchor_xyz_cam / np.linalg.norm(
     anchor_xyz_cam, axis=-1, keepdims=True
@@ -258,7 +278,7 @@ est_query_xyz = anchor_xyz[:, None] + query_offsets[None]
 query_inds = np.round((est_query_xyz - minbounds) / res).astype(int)
 query_xyz = query_inds * res + minbounds
 
-img_feat, _, _ = cnn(imgs_t[None, img_ind])
+img_feat = cnn(imgs_t[None, img_ind])
 
 anchor_uv_t = (
     anchor_uv
@@ -366,7 +386,9 @@ anchor_spheres = sum(
     ]
 )
 
-geoms = [pred_mesh, gt_pcd, anchor_spheres, cam_pcd]
+# geoms = [pred_mesh, gt_pcd, anchor_spheres, cam_pcd]
+geoms = [pred_mesh, gt_pcd]
+# geoms = [pred_mesh]
 visibility = [True] * len(geoms)
 
 

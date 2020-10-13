@@ -1,1 +1,1 @@
-wandb = False
+wandb = True

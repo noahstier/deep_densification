@@ -118,9 +118,7 @@ class MLP(torch.nn.Module):
         )
 
         self.classifier = torch.nn.Sequential(
-            bn_relu_fc(256, 64),
-            bn_relu_fc(64, 16),
-            bn_relu_fc(16, 1),
+            bn_relu_fc(256, 64), bn_relu_fc(64, 16), bn_relu_fc(16, 1),
         )
 
     def forward(self, coords, feats):
@@ -419,7 +417,7 @@ if __name__ == "__main__":
                 bn_relu_fc(128, 128),
                 bn_relu_fc(128, 128),
                 torch.nn.BatchNorm1d(128),
-                torch.nn.ReLU()
+                torch.nn.ReLU(),
             ),
             # "rot_class": torch.nn.Sequential(
             #     bn_relu_fc(128, 128),
@@ -514,9 +512,12 @@ if __name__ == "__main__":
 
             opt.zero_grad()
 
-            rot_feats = model['rot_encoder'](torch.nn.functional.one_hot(rotind, num_classes=42).float())
-            rot_feats = rot_feats[:, None, None].repeat(1, dset.n_anchors, dset.n_uniform, 1)
-
+            rot_feats = model["rot_encoder"](
+                torch.nn.functional.one_hot(rotind, num_classes=42).float()
+            )
+            rot_feats = rot_feats[:, None, None].repeat(
+                1, dset.n_anchors, dset.n_uniform, 1
+            )
 
             # if np.any([torch.any(torch.isnan(a)) for a in model['cnn'].parameters()]):
             #     raise Exception('gah')
@@ -557,7 +558,6 @@ if __name__ == "__main__":
             # rot_logits = model['rot_class'](pixel_feats.reshape(-1, pixel_feats.shape[-1]))
             # rot_loss = ce(rot_logits, rotind)
 
-
             pixel_feats = pixel_feats[:, :, None].repeat(
                 (1, 1, query_coords.shape[2], 1)
             )
@@ -575,7 +575,6 @@ if __name__ == "__main__":
             # target = log_transform(query_sd / dset.query_radius)
             # inputs = log_transform(preds)
 
-
             sd_loss = torch.abs(target - inputs)
             inds = (torch.abs(query_sd) < 0.02).float()
             sd_loss = torch.sum(sd_loss) / torch.sum(inds)
@@ -585,7 +584,6 @@ if __name__ == "__main__":
             # loss = rot_loss
 
             # rot_acc = torch.mean((torch.argmax(rot_logits, dim=-1) == rotind).float()).item()
-
 
             # loss = bce(logits, query_occ)
             loss.backward()

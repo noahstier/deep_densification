@@ -68,7 +68,7 @@ tups = sorted(tups, key=lambda tup: tup[-1], reverse=True)
 # house_dir = train_house_dirs[1]
 # img_ind = 0
 house_dir = test_house_dirs[-2]
-img_ind = 39
+img_ind = 79
 
 rgb_imgdir = os.path.join(house_dir, "imgs/color")
 depth_imgdir = os.path.join(house_dir, "imgs/depth")
@@ -138,8 +138,7 @@ model = torch.nn.ModuleDict(
         "cnn": fpn.FPN(input_height, input_width, 1),
     }
 )
-# model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/all-classes-122690")["model"])
+model.load_state_dict(torch.load("models/all-classes-1374134")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -159,12 +158,12 @@ for i, im_id in enumerate(im_ids):
     )
 
 res = 0.02
-x = np.arange(-0.2, 0.2, res)
-y = np.arange(-0.2, 0.2, res)
-z = np.arange(-0.2, 0.2, res)
+d = 0.2 * np.sqrt(2) / 2
+x = np.arange(-d, d, res)
+y = np.arange(-d, d, res)
+z = np.arange(-d, d, res)
 xx, yy, zz = np.meshgrid(x, y, z)
 query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
-query_offset_center = np.array([np.mean(x), np.mean(y), np.mean(z)])
 
 x = np.arange(len(x), dtype=int)
 y = np.arange(len(y), dtype=int)
@@ -238,7 +237,7 @@ query_coords = torch.Tensor(
     (query_xyz_cam_rotated - anchor_xyz_cam_rotated[:, None]) / 0.2
 ).cuda()
 
-img_feat, _, _ = cnn(imgs_t[None, img_ind])
+img_feat = cnn(imgs_t[None, img_ind])
 anchor_uv_t = (
     anchor_uv
     / [depth_img.shape[1], depth_img.shape[0]]

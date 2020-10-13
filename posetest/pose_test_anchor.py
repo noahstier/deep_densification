@@ -4,6 +4,7 @@ import os
 
 import cv2
 import h5py
+import matplotlib.pyplot as plt
 import PIL.Image
 import numpy as np
 import open3d as o3d
@@ -19,6 +20,7 @@ import config
 trimesh.constants.log.setLevel(logging.ERROR)
 
 import fpn
+import loader
 
 
 torch.manual_seed(1)
@@ -78,27 +80,6 @@ def bn_relu_fc(in_c, out_c):
         torch.nn.Linear(in_c, out_c, bias=False),
     )
 
-def elu_fc(in_c, out_c):
-    return torch.nn.Sequential(
-        torch.nn.ELU(),
-        torch.nn.Linear(in_c, out_c, bias=False),
-    )
-
-
-class res_block(torch.nn.Module):
-    def __init__(self, n_channels):
-        super().__init__()
-        self.layers = torch.nn.Sequential(
-            torch.nn.Linear(n_channels, n_channels, bias=False),
-            torch.nn.BatchNorm1d(n_channels),
-            torch.nn.ReLU(),
-            torch.nn.Linear(n_channels, n_channels, bias=False),
-            torch.nn.BatchNorm1d(n_channels),
-        )
-
-    def forward(self, inputs):
-        return torch.nn.functional.relu(self.layers(inputs) + inputs)
-
 
 class MLP(torch.nn.Module):
     def __init__(self):
@@ -136,261 +117,12 @@ class MLP(torch.nn.Module):
         return logits
 
 
-class Dataset(torch.utils.data.Dataset):
-    def __init__(self):
-        self.dsetdir = "dset-background"
-
-        self.rgb_imgfiles = sorted(glob.glob(os.path.join(self.dsetdir, "rgb/*.jpg")))
-        self.depth_imgfiles = sorted(
-            glob.glob(os.path.join(self.dsetdir, "depth/*.png"))
-        )
-        self.poses = np.load(os.path.join(self.dsetdir, "poses.npy"))
-        self.intrinsic = np.load(os.path.join(self.dsetdir, "intrinsic.npy"))
-        self.inv_intrinsic = np.linalg.inv(self.intrinsic)
-
-        query_npz = np.load(os.path.join(self.dsetdir, "sdf.npz"))
-        self.query_pts = query_npz["pts"]
-        self.query_sdf = query_npz["sd"]
-
-        self.poses = np.load(os.path.join(self.dsetdir, "poses.npy"))
-
-        self.mesh = trimesh.load("fuze.obj")
-        v = np.asarray(self.mesh.vertices)
-        vertmean = np.mean(v, axis=0)
-        diaglen = np.linalg.norm(np.max(v, axis=0) - np.min(v, axis=0))
-        v = (v - vertmean) / diaglen
-        self.mesh.vertices = v
-
-        # self.maxnorm = np.linalg.norm(np.max(self.mesh.vertices, axis=0))
-        self.n_normal = 200
-        self.n_uniform = 256
-        self.query_radius = 0.2
-
-        self.n_anchors = 8
-
-    def __len__(self):
-        """
-        """
-        return len(self.rgb_imgfiles)
-        """
-        """
-        # return len(self.rgb_imgfiles)
-
-    def __getitem__(self, index):
-        """
-        """
-        # index = 0
-        """
-        """
-
-        depth_img = (
-            cv2.imread(self.depth_imgfiles[index], cv2.IMREAD_ANYDEPTH).astype(
-                np.float32
-            )
-            / 1000
-        )
-        pil_img = PIL.Image.open(self.rgb_imgfiles[index])
-        rgb_img = np.asarray(pil_img).copy()
-        rgb_img_t = fpn.transform(pil_img)
-
-        # rgb_img = rgb_img - ((rgb_img == 255) * np.random.randint(100, size=rgb_img.shape)).astype(np.uint8)
-        pose = self.poses[index]
-
-        uv = np.argwhere(depth_img > 0)[:, [1, 0]]
-        inds = np.arange(len(uv))
-        anchor_inds = uv[np.random.choice(inds, size=self.n_anchors, replace=False)]
-
-        anchor_uv = anchor_inds
-        anchor_range = depth_img[anchor_inds[:, 1], anchor_inds[:, 0]]
-        anchor_xyz_cam = (
-            (self.inv_intrinsic @ np.c_[anchor_uv, np.ones(len(anchor_uv))].T)
-            * -anchor_range
-        ).T
-
-        anchor_xyz_canonical = (
-            np.linalg.inv(pose) @ np.c_[anchor_xyz_cam, np.ones(len(anchor_xyz_cam))].T
-        ).T[:, :3]
-
-        in_range_inds = (
-            np.linalg.norm(anchor_xyz_canonical[:, None] - self.query_pts, axis=-1)
-            < self.query_radius
-        )
-
-        query_tsdf = []
-        query_xyz_cam = []
-        for i in range(self.n_anchors):
-            inds = np.random.choice(
-                np.argwhere(in_range_inds[i]).flatten(),
-                replace=False,
-                size=self.n_uniform,
-            )
-            query_pts = self.query_pts[inds]
-            query_tsdf.append(self.query_sdf[inds])
-            query_xyz_cam.append(
-                (pose @ np.c_[query_pts, np.ones(len(query_pts))].T).T[:, :3]
-            )
-
-        query_xyz_cam = np.stack(query_xyz_cam, axis=0)
-        query_sd = np.stack(query_tsdf, axis=0)
-
-        # x = np.random.normal(0, 1, size=(self.n_uniform, 5))
-        # uniform_query_pts = (
-        #     x[:, :3] / np.linalg.norm(x, axis=-1, keepdims=True) * self.maxnorm * 1.1
-        # )
-        # normal_query_pts = self.mesh.sample(self.n_normal) + np.random.normal(
-        #     0, 0.05, size=(self.n_normal, 3)
-        # )
-        # query_pts = np.concatenate((uniform_query_pts, normal_query_pts), axis=0)
-
-        # x = np.random.normal(0, 1, size=(self.n_anchors, self.n_uniform, 5))
-        # query_xyz_cam = (
-        #     x[..., :3] / np.linalg.norm(x, axis=-1, keepdims=True) * self.query_radius
-        #     + anchor_xyz_cam[:, None]
-        # )
-
-        # query_sd = np.stack(
-        #     [self.mesh.nearest.signed_distance(query_pts[i]) for i in range(self.n_anchors)], axis=0
-        # )
-        query_occ = query_sd > 0
-        # query_xyz_cam = (pose @ np.c_[query_pts, np.ones(len(query_pts))].T).T[:, :3]
-
-        anchor_cam_unit = anchor_xyz_cam / np.linalg.norm(
-            anchor_xyz_cam, axis=-1, keepdims=True
-        )
-        center_pixel_u = np.array([0, 0, -1])
-
-        xz_plane_projection = np.array([1, 0, 1]) * anchor_cam_unit
-        xz_plane_projection /= np.linalg.norm(
-            xz_plane_projection, axis=-1, keepdims=True
-        )
-        rot_axis = np.cross(center_pixel_u, xz_plane_projection)
-        rot_axis /= np.linalg.norm(rot_axis, axis=-1, keepdims=True)
-        horiz_angle = np.arccos(np.dot(xz_plane_projection, center_pixel_u))
-        horiz_rot = scipy.spatial.transform.Rotation.from_rotvec(
-            rot_axis * horiz_angle[:, None]
-        ).as_matrix()
-
-        yz_plane_projection = np.array([0, 1, 1]) * (
-            (np.linalg.inv(horiz_rot) @ anchor_cam_unit.T)[
-                np.arange(self.n_anchors), :, np.arange(self.n_anchors)
-            ]
-        )
-        yz_plane_projection /= np.linalg.norm(
-            yz_plane_projection, axis=-1, keepdims=True
-        )
-        rot_axis = np.cross(center_pixel_u, yz_plane_projection)
-        rot_axis /= np.linalg.norm(rot_axis, axis=-1, keepdims=True)
-        vert_angle = np.arccos(np.dot(yz_plane_projection, center_pixel_u))
-        vert_rot = scipy.spatial.transform.Rotation.from_rotvec(
-            rot_axis * vert_angle[:, None]
-        ).as_matrix()
-
-        cam2anchor_rot = horiz_rot @ vert_rot
-
-        """
-        todo
-        """
-
-        '''
-        cross = np.cross(center_pixel_u, anchor_cam_unit)
-        cross /= np.linalg.norm(cross, axis=-1, keepdims=True)
-        dot = np.dot(center_pixel_u, anchor_cam_unit.T)
-        axis = cross
-        if np.any(np.isnan(axis)):
-            return self[np.random.randint(0, len(self))]
-        angle = np.arccos(dot) 
-        cam2anchor_rot = scipy.spatial.transform.Rotation.from_rotvec(axis * angle[:, None]).as_matrix()
-        '''
-
-        query_xyz_cam_rotated = np.stack(
-            [
-                (np.linalg.inv(cam2anchor_rot[i]) @ query_xyz_cam[i].T).T
-                for i in range(self.n_anchors)
-            ],
-            axis=0,
-        )
-        anchor_xyz_cam_rotated = (np.linalg.inv(cam2anchor_rot) @ anchor_xyz_cam.T)[
-            np.arange(self.n_anchors), :, np.arange(self.n_anchors)
-        ]
-
-        query_coords = (
-            query_xyz_cam_rotated - anchor_xyz_cam_rotated[:, None]
-        ) / self.query_radius
-        # query_coords = positional_encoding(query_coords, L=2)
-
-        """
-
-        verts = (pose @ np.c_[self.mesh.vertices, np.ones(len(self.mesh.vertices))].T).T[:, :3]
-        uv = np.argwhere(depth_img > 0)[:, [1, 0]]
-        ranges = depth_img[uv[:, 1], uv[:, 0]]
-        xyz_cam = (self.inv_intrinsic @ np.c_[uv, np.ones(len(uv))].T).T * -ranges[:, None]
-
-        gcf().add_subplot(111, projection='3d')
-        plot(verts[:, 0], verts[:, 1], verts[:, 2], '.')
-        plot(xyz_cam[:, 0], xyz_cam[:, 1], xyz_cam[:, 2], '.')
-
-        figure()
-        subplot(221)
-        imshow(rgb_img)
-        plot(anchor_uv[0], anchor_uv[1], '.')
-        gcf().add_subplot(222, projection='3d')
-        plot(query_xyz_cam[query_occ, 0], query_xyz_cam[query_occ, 1], query_xyz_cam[query_occ, 2], '.')
-        plot(query_xyz_cam[~query_occ, 0], query_xyz_cam[~query_occ, 1], query_xyz_cam[~query_occ, 2], '.')
-        plot([anchor_xyz_cam[0]], [anchor_xyz_cam[1]], [anchor_xyz_cam[2]], '.')
-        plot([0], [0], [0], '.')
-        plot(verts[:, 0], verts[:, 1], verts[:, 2], 'k.', markersize=.1)
-        plot(xyz_cam[:, 0], xyz_cam[:, 1], xyz_cam[:, 2], '.')
-        xlabel('x')
-        ylabel('y')
-        gcf().add_subplot(223, projection='3d')
-        plot(query_xyz_cam_rotated[query_occ, 0], query_xyz_cam_rotated[query_occ, 1], query_xyz_cam_rotated[query_occ, 2], '.')
-        plot(query_xyz_cam_rotated[~query_occ, 0], query_xyz_cam_rotated[~query_occ, 1], query_xyz_cam_rotated[~query_occ, 2], '.')
-        plot([anchor_xyz_cam_rotated[0]], [anchor_xyz_cam_rotated[1]], [anchor_xyz_cam_rotated[2]], '.')
-        plot([0], [0], [0], '.')
-        xlabel('x')
-        ylabel('y')
-        gcf().add_subplot(224, projection='3d')
-        plot(query_coords[query_occ, 0], query_coords[query_occ, 1], query_coords[query_occ, 2], '.')
-        plot(query_coords[~query_occ, 0], query_coords[~query_occ, 1], query_coords[~query_occ, 2], '.')
-        plot([0], [0], [0], '.')
-        xlabel('x')
-        ylabel('y')
-        """
-
-        return (
-            rgb_img,
-            rgb_img_t,
-            depth_img,
-            anchor_uv,
-            anchor_xyz_cam,
-            anchor_xyz_cam_rotated,
-            query_xyz_cam,
-            query_xyz_cam_rotated,
-            query_coords.astype(np.float32),
-            query_occ,
-            query_sd,
-            pose,
-            cam2anchor_rot,
-            index,
-        )
-
-
 if __name__ == "__main__":
 
-    batch_size = 16
+    batch_size = 4
 
-    dset = Dataset()
-    """
-    inds = np.arange(len(dset))
-    np.random.shuffle(inds)
-    for i in tqdm.tqdm(inds):
-        batch = dset[i]
-        rgb_img, rgb_img_t, anchor_uv, query_xyz_cam, query_occ = batch
-        if np.any(np.isnan(query_xyz_cam)):
-            break
-    """
-
-    loader = torch.utils.data.DataLoader(
+    dset = loader.Dataset()
+    trainloader = torch.utils.data.DataLoader(
         dset,
         num_workers=10,
         drop_last=True,
@@ -406,11 +138,6 @@ if __name__ == "__main__":
         {"cnn": fpn.FPN(input_height, input_width, 1), "mlp": MLP(),}
     ).cuda()
 
-    if False:
-        checkpoint = torch.load("models/test")
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["opt"])
-
     if config.wandb:
         wandb.init(project="posetest")
         wandb.watch(model)
@@ -423,13 +150,19 @@ if __name__ == "__main__":
         ]
     )
 
+    if True:
+        checkpoint = torch.load("models/2500-baseline")
+        model.load_state_dict(checkpoint["model"])
+        opt.load_state_dict(checkpoint["opt"])
+
     bce = torch.nn.BCEWithLogitsLoss()
 
     step = 0
     for epoch in range(1000):
         print("epoch {}".format(epoch))
+
         model.train()
-        for batch in tqdm.tqdm(loader):
+        for batch in tqdm.tqdm(trainloader):
             (
                 rgb_img,
                 rgb_img_t,
@@ -442,14 +175,46 @@ if __name__ == "__main__":
                 query_coords,
                 query_occ,
                 query_sd,
-                pose,
+                query_inds,
+                camera_pose,
                 cam2anchor_rot,
                 index,
             ) = batch
             assert rgb_img.shape[0] == batch_size
 
-            # if np.any([torch.any(torch.isnan(a)) for a in batch]):
-            #     raise Exception('gah')
+            rgb_img_t = rgb_img_t.cuda()
+            query_coords = query_coords.cuda()
+            # query_occ = query_occ.cuda().float()
+            query_sd = query_sd.cuda().float()
+
+            img_feats = model["cnn"](rgb_img_t)
+            img_feats = torch.nn.functional.interpolate(
+                img_feats,
+                size=(rgb_img_t.shape[2:]),
+                mode="bilinear",
+                align_corners=False,
+            )
+            anchor_uv_t = (
+                (
+                    anchor_uv
+                    / torch.Tensor([rgb_img.shape[2], rgb_img.shape[1]])
+                    * torch.Tensor([img_feats.shape[3], img_feats.shape[2]])
+                )
+                .float()
+                .cuda()
+            )
+
+            pixel_feats = []
+            for i in range(len(img_feats)):
+                pixel_feats.append(interp_img(img_feats[i], anchor_uv_t[i]).T)
+            pixel_feats = torch.stack(pixel_feats, dim=0)
+            pixel_feats = pixel_feats[:, :, None].repeat(
+                (1, 1, query_coords.shape[2], 1)
+            )
+
+            logits = model["mlp"](query_coords, pixel_feats)[..., 0]
+
+            preds = torch.tanh(logits)
 
             """
             j = 0
@@ -484,15 +249,7 @@ if __name__ == "__main__":
 
             opt.zero_grad()
 
-            # if np.any([torch.any(torch.isnan(a)) for a in model['cnn'].parameters()]):
-            #     raise Exception('gah')
-            img_feats, _, fpn_features = model["cnn"](rgb_img_t)
-            # if np.any([torch.any(torch.isnan(a)) for a in model['cnn'].parameters()]):
-            #     raise Exception('gah')
-            # if np.any([torch.any(torch.isinf(a)) for a in model['cnn'].parameters()]):
-            #     raise Exception('gah')
-            # if torch.any(torch.isnan(img_feats)):
-            #     raise Exception('gah')
+            img_feats = model["cnn"](rgb_img_t)
 
             img_feats = torch.nn.functional.interpolate(
                 img_feats,
@@ -532,16 +289,12 @@ if __name__ == "__main__":
             # inputs = log_transform(preds)
 
             loss = torch.abs(target - inputs)
-            # inds = (torch.abs(query_sd) < 0.01).float()
-            # loss = torch.sum(loss) / torch.sum(inds)
-            loss = torch.norm(torch.mean(loss, dim=-1), dim=(0, 1))
+            inds = (torch.abs(query_sd) < 0.01).float()
+            loss = torch.sum(loss) / torch.sum(inds)
 
             # loss = bce(logits, query_occ)
             loss.backward()
             opt.step()
-
-            # if np.any([torch.any(torch.isnan(a)) for a in model['cnn'].parameters()]):
-            #     raise Exception('gah')
 
             # preds = torch.sigmoid(logits)
 
@@ -554,9 +307,6 @@ if __name__ == "__main__":
             all_actual_pos = torch.sum(pos_inds)
             precision = true_pos / all_predicted_pos
             recall = true_pos / all_actual_pos
-
-            # if torch.any(torch.isnan(logits)).item():
-            #     raise Exception('gah')
 
             if config.wandb:
                 wandb.log(
@@ -574,6 +324,111 @@ if __name__ == "__main__":
                 )
 
             step += 1
+
+        if config.wandb:
+            """
+            eval loop
+            """
+            model.eval()
+            n_correct = torch.zeros(len(dset.query_pts)).cuda()
+            n_total = torch.zeros(len(dset.query_pts)).cuda()
+            it = iter(tqdm.tqdm(trainloader))
+            while torch.mean((n_total >= 10).float()) < 0.1:
+                batch = next(it)
+                (
+                    rgb_img,
+                    rgb_img_t,
+                    depth_img,
+                    anchor_uv,
+                    anchor_xyz_cam,
+                    anchor_xyz_cam_rotated,
+                    query_xyz_cam,
+                    query_xyz_cam_rotated,
+                    query_coords,
+                    query_occ,
+                    query_sd,
+                    query_inds,
+                    camera_pose,
+                    cam2anchor_rot,
+                    index,
+                ) = batch
+                rgb_img_t = rgb_img_t.cuda()
+                query_coords = query_coords.cuda()
+                # query_occ = query_occ.cuda().float()
+                query_sd = query_sd.cuda().float()
+
+                img_feats = model["cnn"](rgb_img_t)
+                img_feats = torch.nn.functional.interpolate(
+                    img_feats,
+                    size=(rgb_img_t.shape[2:]),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                anchor_uv_t = (
+                    (
+                        anchor_uv
+                        / torch.Tensor([rgb_img.shape[2], rgb_img.shape[1]])
+                        * torch.Tensor([img_feats.shape[3], img_feats.shape[2]])
+                    )
+                    .float()
+                    .cuda()
+                )
+
+                pixel_feats = []
+                for i in range(len(img_feats)):
+                    pixel_feats.append(interp_img(img_feats[i], anchor_uv_t[i]).T)
+                pixel_feats = torch.stack(pixel_feats, dim=0)
+                pixel_feats = pixel_feats[:, :, None].repeat(
+                    (1, 1, query_coords.shape[2], 1)
+                )
+
+                logits = model["mlp"](query_coords, pixel_feats)[..., 0]
+                preds = torch.tanh(logits)
+                correct = ((preds > 0) == (query_sd > 0)).float()
+                for i in range(correct.shape[0]):
+                    for j in range(correct.shape[1]):
+                        n_correct[query_inds[i, j]] += correct[i, j]
+                        n_total[query_inds[i, j]] += 1
+
+            acc = (n_correct / n_total).cpu().numpy()
+            inds = (n_total.cpu().numpy() >= 10) & (acc < 0.98)
+
+            plot3()
+            plot(dset.query_pts[:, 0], dset.query_pts[:, 1], dset.query_pts[:, 2], ".")
+            xlabel("x")
+            ylabel("y")
+
+            plt.figure()
+            plt.subplot(131)
+            plt.scatter(
+                dset.query_pts[inds, 0],
+                dset.query_pts[inds, 2],
+                c=plt.cm.jet(acc[inds]),
+                alpha=0.7,
+            )
+            plt.axis("off")
+            plt.subplot(132)
+            plt.scatter(
+                dset.query_pts[inds, 0],
+                dset.query_pts[inds, 1],
+                c=plt.cm.jet(acc[inds]),
+                alpha=0.7,
+            )
+            plt.axis("off")
+            plt.subplot(133)
+            plt.scatter(
+                dset.query_pts[inds, 1],
+                dset.query_pts[inds, 2],
+                c=plt.cm.jet(acc[inds]),
+                alpha=0.7,
+            )
+            plt.axis("off")
+            plt.tight_layout()
+            plt.gcf().set_size_inches(16, 8)
+            plt.savefig("plots.png", bbox_inches="tight", dpi=300)
+            plt.close()
+
+            wandb.log({"test plots": wandb.Image("plots.png")}, step=step)
 
         torch.save(
             {"model": model.state_dict(), "opt": opt.state_dict()},

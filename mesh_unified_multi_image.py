@@ -11,11 +11,13 @@ import numpy as np
 import open3d as o3d
 import pickle
 import PIL.Image
+import pyrender
 import scipy.spatial
 import scipy.ndimage
 import skimage.measure
 import torch
 import torchvision
+import trimesh
 import tqdm
 import wandb
 
@@ -24,6 +26,37 @@ import config
 import unet
 
 import depth_conditioned_coords
+
+
+def render_depth_img(mesh, extrinsic, intrinsic):
+    fuze_trimesh = trimesh.Trimesh(
+        np.asarray(mesh.vertices), np.asarray(mesh.triangles)
+    )
+    mesh = pyrender.Mesh.from_trimesh(fuze_trimesh)
+    scene = pyrender.Scene()
+    scene.add(mesh)
+    camera = pyrender.IntrinsicsCamera(
+        intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
+    )
+    camera_pose = np.eye(4)
+    camera_pose[:3, 3] = extrinsic[:3, 3]
+    camera_pose[:3, :3] = extrinsic[:3, :3]
+    r = scipy.spatial.transform.Rotation.from_rotvec(
+        np.array([1, 0, 0]) * np.pi
+    ).as_matrix()
+    camera_pose[:3, :3] = camera_pose[:3, :3] @ r
+    scene.add(camera, pose=camera_pose)
+    light = pyrender.SpotLight(
+        color=np.ones(3),
+        intensity=100,
+        innerConeAngle=np.pi / 16.0,
+        outerConeAngle=np.pi / 6.0,
+    )
+    scene.add(light, pose=camera_pose)
+    r = pyrender.OffscreenRenderer(640, 480)
+    _, depth = r.render(scene)
+    return depth
+
 
 torch.manual_seed(1)
 torch.backends.cudnn.deterministic = True
@@ -74,6 +107,10 @@ fusion_npz = np.load(os.path.join(house_dir, "fusion.npz"))
 sfm_imfile = os.path.join(house_dir, "sfm/sparse/auto/images.bin")
 sfm_ptfile = os.path.join(house_dir, "sfm/sparse/auto/points3D.bin")
 
+delaunay_meshfile = os.path.join(house_dir, "sfm/sparse/auto/meshed-delaunay.ply")
+delaunay_mesh = o3d.io.read_triangle_mesh(delaunay_meshfile)
+smoothed_mesh = delaunay_mesh.filter_smooth_laplacian()
+
 ims = colmap_reader.read_images_binary(sfm_imfile)
 pts = colmap_reader.read_points3d_binary(sfm_ptfile)
 
@@ -121,11 +158,9 @@ model = torch.nn.ModuleDict(
     {
         "cnn": fpn.FPN(input_height, input_width, 1),
         "mlp": depth_conditioned_coords.MLP(),
-        "cnn": fpn.FPN(input_height, input_width, 1),
     }
 )
-# model.load_state_dict(torch.load("models/sofa-only")['model'])
-model.load_state_dict(torch.load("models/all-classes-122690")["model"])
+model.load_state_dict(torch.load("models/all-classes-392609")["model"])
 model = model.cuda()
 model.eval()
 model.requires_grad_(False)
@@ -162,16 +197,73 @@ query_inds = np.round((est_query_xyz - minbounds) / res).astype(int)
 query_xyz = query_inds * res + minbounds
 
 print("extracting image features")
-img_feats = torch.cat([cnn(img_t[None])[0].cpu() for img_t in tqdm.tqdm(imgs_t)], dim=0)
+img_feats = torch.cat([cnn(img_t[None]).cpu() for img_t in tqdm.tqdm(imgs_t)], dim=0)
 
 pred_vol = np.zeros(n_bins)
 count_vol = np.zeros(n_bins, dtype=int)
 
 print("inference")
-for im_id in tqdm.tqdm(im_ids[1:]):
+for im_id in tqdm.tqdm(im_ids[1::10]):
     im = ims[im_id]
     img_ind = im_id - 1
 
+    sfm_xyz_cam = (
+        np.linalg.inv(camera_extrinsics[img_ind])
+        @ np.c_[sfm_xyz, np.ones(len(sfm_xyz))].T
+    ).T[:, :3]
+
+    sfm_uv = (camera_intrinsic @ sfm_xyz_cam.T).T
+    sfm_uv = sfm_uv[:, :2] / sfm_uv[:, 2:]
+
+    in_frustum_inds = (
+        (sfm_xyz_cam[:, 2] > 0)
+        & (sfm_uv[:, 0] >= 0)
+        & (sfm_uv[:, 0] <= imwidth)
+        & (sfm_uv[:, 1] >= 0)
+        & (sfm_uv[:, 1] <= imheight)
+    )
+
+    est_depth_img = render_depth_img(
+        smoothed_mesh, camera_extrinsics[img_ind], camera_intrinsic
+    )
+
+    sfm_depth = sfm_xyz_cam[:, 2]
+    sfm_uv_inds = np.clip(
+        np.round(sfm_uv).astype(int),
+        [0, 0],
+        [imwidth - 1, imheight - 1],
+    )
+    est_depth = est_depth_img[sfm_uv_inds[:, 1], sfm_uv_inds[:, 0]]
+    est_visible_inds = (sfm_depth < est_depth + 0.01) & in_frustum_inds
+
+    '''
+    cam_pos = camera_extrinsics[img_ind, None, :3, 3]
+    dests = sfm_xyz
+    origins = np.tile(cam_pos, (len(dests), 1))
+    direcs = dests - origins
+    intersector = trimesh.ray.ray_triangle.RayMeshIntersector(
+        trimesh.Trimesh(vertices=verts, faces=faces)
+    )
+    visible_pt_inds = np.zeros(len(sfm_xyz), dtype=bool)
+    for i in range(len(origins)):
+        if in_frustum_inds[i]:
+            locations, ray_idx, tri_idx = intersector.intersects_location(
+                origins[i : i + 1], direcs[i : i + 1]
+            )
+            intersector.intersects_location(origins[i : i + 1], direcs[i : i + 1])
+            intersect_dist = np.min(np.linalg.norm(locations - cam_pos, axis=1))
+            pt_dist = np.linalg.norm(cam_pos - dests[i])
+            if intersect_dist + 0.01 > pt_dist:
+                visible_pt_inds[i] = True
+
+    '''
+    visible_pt_inds = np.argwhere(est_visible_inds).flatten()
+
+    anchor_xyz = sfm_xyz[visible_pt_inds]
+    anchor_xyz_cam = sfm_xyz_cam[visible_pt_inds]
+    anchor_uv = sfm_uv[visible_pt_inds]
+
+    """
     im_pt_ids = set(im.point3D_ids)
     visible_pt_inds = np.array(
         [i for i, pt_id in enumerate(pt_ids) if pt_id in im_pt_ids]
@@ -179,13 +271,7 @@ for im_id in tqdm.tqdm(im_ids[1:]):
     if len(visible_pt_inds) == 0:
         continue
     anchor_xyz = sfm_xyz[visible_pt_inds]
-    anchor_xyz_cam = (
-        np.linalg.inv(camera_extrinsics[img_ind])
-        @ np.c_[anchor_xyz, np.ones(len(anchor_xyz))].T
-    ).T[:, :3]
-
-    anchor_uv = (camera_intrinsic @ anchor_xyz_cam.T).T
-    anchor_uv = anchor_uv[:, :2] / anchor_uv[:, 2:]
+    """
     anchor_uv = np.clip(anchor_uv, [0, 0], [imgs.shape[2] - 1, imgs.shape[1] - 1])
     # anchor_uv = np.stack([xy for i, xy in enumerate(im.xys) if im.point3D_ids[i] in pts], axis=0)
 
@@ -193,6 +279,7 @@ for im_id in tqdm.tqdm(im_ids[1:]):
 
     anchor_classes = cat_imgs[img_ind, anchor_inds[:, 1], anchor_inds[:, 0]]
     anchor_included = np.array([i in included_classes for i in anchor_classes])
+    # anchor_included = np.ones(len(anchor_classes), dtype=bool)
 
     if np.sum(anchor_included) == 0:
         continue

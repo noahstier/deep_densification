@@ -9,9 +9,10 @@ import fpn
 
 
 import pose_test_anchor
+import loader
 
 
-dset = pose_test_anchor.Dataset()
+dset = loader.Dataset()
 
 input_height, input_width = fpn.transform(PIL.Image.fromarray(dset[0][0])).shape[1:]
 
@@ -19,7 +20,7 @@ model = torch.nn.ModuleDict(
     {"cnn": fpn.FPN(input_height, input_width, 1), "mlp": pose_test_anchor.MLP(),}
 ).cuda()
 
-checkpoint = torch.load("models/test-1250")
+checkpoint = torch.load("models/test-2500")
 model.load_state_dict(checkpoint["model"])
 model.eval()
 model.requires_grad_(False)
@@ -48,7 +49,7 @@ query_offsets = np.c_[xx.flatten(), yy.flatten(), zz.flatten()]
     pose,
     cam2anchor_rot,
     index,
-) = dset[1]
+) = dset[3]
 
 j = 1
 anchor_uv = anchor_uv[j]
@@ -107,7 +108,7 @@ query_coords = torch.Tensor(query_coords[None]).float().cuda()
 query_occ = torch.Tensor(query_occ)
 query_sd = torch.Tensor(query_sd).cuda()
 
-img_feats, _, _ = model["cnn"](rgb_img_t)
+img_feats = model["cnn"](rgb_img_t)
 img_feats = torch.nn.functional.interpolate(
     img_feats, size=(rgb_img_t.shape[2:]), mode="bilinear", align_corners=False
 )
