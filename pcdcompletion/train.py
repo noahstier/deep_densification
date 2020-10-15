@@ -9,27 +9,31 @@ import torch
 import tqdm
 import wandb
 
+import config
 import loader
 import decoders
 import pointnet
 import pointnet2
 
-'''
+"""
 to improve:
     more scans
     cbatchnorm
     image feats
     pointnet++
-'''
+"""
 
-_wandb = True
-
-scannet_dir = "/home/noah/data/scannet"
-scan_dirs = sorted(glob.glob(os.path.join(scannet_dir, "*")))
+scan_dirs = sorted(
+    [
+        d
+        for d in glob.glob(os.path.join(config.scannet_dir, "*"))
+        if os.path.exists(os.path.join(d, "tsdf_0.16.npz"))
+    ]
+)
 
 train_dset = loader.Dataset(scan_dirs[3:], 10, split="train")
 train_loader = torch.utils.data.DataLoader(
-    train_dset, batch_size=3, shuffle=True, num_workers=8, drop_last=True
+    train_dset, batch_size=3, shuffle=True, num_workers=config.num_workers, drop_last=True
 )
 
 np.random.seed(0)
@@ -38,7 +42,7 @@ test_batch = test_dset[0]
 
 # encoder = pointnet.PointNetfeat(use_bn=False)
 encoder = pointnet.DumbPointnet(6)
-# encoder = pointnet2.models.PointNet2ClassificationMSG({"model.use_xyz": True})
+# encoder = pointnet.PointNetPP({"model.use_xyz": True})
 decoder = decoders.Decoder(dim=3, z_dim=0, c_dim=1024, hidden_size=256, leaky=False)
 
 model = torch.nn.ModuleDict({"encoder": encoder, "decoder": decoder}).cuda()
@@ -46,7 +50,7 @@ model = torch.nn.ModuleDict({"encoder": encoder, "decoder": decoder}).cuda()
 opt = torch.optim.Adam(model.parameters())
 bce = torch.nn.BCEWithLogitsLoss()
 
-if _wandb:
+if config.wandb:
     wandb.init(project="pcd_completion")
     wandb.watch(model)
 
@@ -102,12 +106,9 @@ for epoch in itertools.count():
         preds = torch.round(torch.sigmoid(logits))
 
         n_examples = torch.sum(near_inds.float())
-        acc_num += torch.sum(preds.bool() == query_occ)[near_inds].float().item()
+        acc_num += torch.sum((preds.bool() == query_occ)[near_inds]).float().item()
         loss_num += (loss * n_examples).item()
         denom += n_examples.item()
-
-    if _wandb:
-        wandb.log({"train loss": loss_num / denom, "train acc": acc_num / denom}, step=step)
 
     model.eval()
     (
@@ -128,11 +129,20 @@ for epoch in itertools.count():
     pointnet_inputs = torch.cat((pts, rgb), dim=-1)
     pointnet_feats = encoder(pointnet_inputs)
     logits = decoder(query_coords, None, pointnet_feats)
-    loss = bce(logits, query_occ.float())
+    test_loss = bce(logits, query_occ.float())
     preds = torch.round(torch.sigmoid(logits))
-    acc = torch.mean((preds.bool() == query_occ).float())
-    if _wandb:
-        wandb.log({"test loss": loss.item(), "test acc": acc.item(),}, step=step)
+    test_acc = torch.mean((preds.bool() == query_occ).float())
+
+    if config.wandb:
+        wandb.log(
+            {
+                "train loss": loss_num / denom,
+                "train acc": acc_num / denom,
+                "test loss": test_loss.item(),
+                "test acc": test_acc.item(),
+            },
+            step=step,
+        )
 
     torch.save(
         {"model": model.state_dict(), "opt": opt.state_dict()},

@@ -43,7 +43,8 @@ def predict_mesh(model, pts, rgb):
 scannet_dir = "/home/noah/data/scannet"
 scan_dirs = sorted(glob.glob(os.path.join(scannet_dir, "*")))
 
-test_dset = loader.Dataset(scan_dirs[3:], 50, split="test")
+# test_dset = loader.Dataset(scan_dirs[3:], 50, split="test")
+test_dset = loader.Dataset(scan_dirs, 10, split="test")
 test_loader = torch.utils.data.DataLoader(
     test_dset, batch_size=1, shuffle=False
 )
@@ -102,4 +103,5 @@ gt_mesh.compute_vertex_normals()
 o3d.visualization.draw_geometries([gt_mesh], mesh_show_back_face=True)
 o3d.visualization.draw_geometries([gt_mesh, mesh], mesh_show_back_face=True)
 o3d.visualization.draw_geometries([pcd, mesh], mesh_show_back_face=True)
+o3d.visualization.draw_geometries([pcd], mesh_show_back_face=True)
 o3d.visualization.draw_geometries([mesh], mesh_show_back_face=True)

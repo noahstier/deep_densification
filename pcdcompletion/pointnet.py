@@ -6,6 +6,26 @@ import torch.utils.data
 from torch.autograd import Variable
 import numpy as np
 import torch.nn.functional as F
+import pointnet2
+
+
+class PointNetPP(pointnet2.models.PointNet2ClassificationMSG):
+    def forward(self, pointcloud):
+        r"""
+            ----------
+            pointcloud: Variable(torch.cuda.FloatTensor)
+                (B, N, 3 + input_channels) tensor
+                Point cloud to run predicts on
+                Each point in the point-cloud MUST
+                be formated as (x, y, z, features...)
+        """
+        xyz, features = self._break_up_pc(pointcloud)
+
+        for module in self.SA_modules:
+            xyz, features = module(xyz, features)
+
+        return features.squeeze(-1)
+
 
 class DumbPointnet(torch.nn.Module):
     def __init__(self, pt_dim):
@@ -18,10 +38,10 @@ class DumbPointnet(torch.nn.Module):
             torch.nn.Linear(512, 1024),
             torch.nn.ReLU(),
         )
+        # self.meh = torch.Tensor([5, 5, .5])
 
     def forward(self, pts):
-        pts /= [5, 5, .5]
-        query_coords /= [5, 5, .5]
+        # pts = torch.cat((pts[..., :3] / self.meh, pts[..., 3:]), dim=-1)
         return torch.max(self.mlp(pts), dim=1)[0]
 
 

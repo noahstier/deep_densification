@@ -2,6 +2,7 @@ import os
 import glob
 
 import cv2
+import h5py
 import imageio
 import numpy as np
 import open3d as o3d
@@ -19,27 +20,11 @@ class Dataset(torch.utils.data.Dataset):
             raise Exception()
         self.split = split
 
-        self.rgb_imgfiles = []
-        self.depth_imgfiles = []
-        for scan_dir in self.scan_dirs:
-            rgb_imgfiles = sorted(
-                glob.glob(os.path.join(scan_dir, "color/*.jpg")),
-                key=lambda f: int(os.path.basename(f).split(".")[0]),
-            )
-            depth_imgfiles = sorted(
-                glob.glob(os.path.join(scan_dir, "depth/*.png")),
-                key=lambda f: int(os.path.basename(f).split(".")[0]),
-            )
-            self.rgb_imgfiles.append(rgb_imgfiles)
-            self.depth_imgfiles.append(depth_imgfiles)
-
     def __len__(self):
-        return len(self.rgb_imgfiles)
+        return len(self.scan_dirs)
 
     def __getitem__(self, index):
         scan_dir = self.scan_dirs[index]
-        rgb_imgfiles = self.rgb_imgfiles[index]
-        depth_imgfiles = self.depth_imgfiles[index]
 
         posefile = os.path.join(scan_dir, "poses.npy")
 
@@ -59,37 +44,14 @@ class Dataset(torch.utils.data.Dataset):
 
         poses = np.load(posefile)
 
-        bad_img_inds = np.any(np.isnan(poses) | np.isinf(poses), axis=(1, 2))
-        poses = poses[~bad_img_inds]
-        rgb_imgfiles = np.array(rgb_imgfiles)[~bad_img_inds]
-        depth_imgfiles = np.array(depth_imgfiles)[~bad_img_inds]
+        img_inds = np.arange(len(poses))
+        img_inds = np.random.choice(img_inds, size=self.n_imgs, replace=False)
 
-        txtfile = os.path.join(scan_dir, os.path.basename(scan_dir) + ".txt")
-        with open(txtfile, "r") as f:
-            lines = f.read().split("\n")
-        axis_alignment = np.fromstring(
-            lines[0].split("=")[1], dtype=float, sep=" "
-        ).reshape(4, 4)
-        poses = (axis_alignment @ poses).astype(np.float32)
-
-        img_inds = np.round(
-            np.linspace(0, len(rgb_imgfiles), 25, endpoint=False)
-        ).astype(int)
-        img_inds = (img_inds + np.random.randint(img_inds[1])) % len(rgb_imgfiles)
-
-        depth_imgs = (
-            np.stack(
-                [imageio.imread(depth_imgfiles[i]) for i in img_inds], axis=0
-            ).astype(np.float32)
-            / 1000
-        )
-        rgb_imgs = np.stack(
-            [
-                cv2.imread(rgb_imgfiles[i], cv2.IMREAD_REDUCED_COLOR_2)[..., [2, 1, 0]]
-                for i in img_inds
-            ],
-            axis=0,
-        )
+        img_dset = h5py.File(os.path.join(scan_dir, 'imgs.h5'), 'r')
+        depth_img_dset = img_dset['depth_imgs']
+        rgb_img_dset = img_dset['rgb_imgs']
+        depth_imgs = np.stack([depth_img_dset[i] for i in img_inds], axis=0).astype(np.float32) / 1000
+        rgb_imgs = np.stack([rgb_img_dset[i] for i in img_inds], axis=0)
 
         imheight, imwidth = depth_imgs[0].shape[:2]
         rgb_imgs_resized = np.stack(
@@ -170,18 +132,16 @@ class Dataset(torch.utils.data.Dataset):
         query_coords -= m
 
         if self.split == "train":
+            angle = np.random.uniform(0, 2 * np.pi) # np.pi * np.random.randint(4)
             rotmat = scipy.spatial.transform.Rotation.from_rotvec(
-                np.array([0, 0, 1]) * np.pi * np.random.randint(4)
+                np.array([0, 0, 1]) * angle
             ).as_matrix()
-            flipmat = np.array(
-                [
-                    [np.random.choice((-1, 1)), 0, 0],
-                    [0, np.random.choice((-1, 1)), 0],
-                    [0, 0, 1],
-                ]
-            )
+            flipmat = np.eye(3)
+            flipmat[0, 0] = np.random.choice((-1, 1))
             pts = (rotmat @ flipmat @ pts.T).T
             query_coords = (rotmat @ flipmat @ query_coords.T).T
+
+            pts += np.random.uniform(-.005, .005, size=pts.shape)
 
             maxpts = 2 ** 14
             if len(pts) > maxpts:
@@ -261,19 +221,16 @@ class Dataset(torch.utils.data.Dataset):
 
 
 if __name__ == "__main__":
-    scannet_dir = "/home/noah/data/scannet"
-    scan_dirs = sorted(glob.glob(os.path.join(scannet_dir, "*")))
+    import config
+    scan_dirs = sorted(glob.glob(os.path.join(config.scannet_dir, "*")))
 
     dset = Dataset(scan_dirs, 10, split="train")
     self = dset
     index = 0
-    a = []
-    b = []
-    for i in range(10):
+    _pts = []
+    for i in tqdm.trange(100):
         pts, rgb, query_coords, query_tsdf = dset[i]
-        a.append(np.mean(pts[pts[:, 0] > -50], axis=0))
-        b.append(np.var(pts[pts[:, 0] > -50], axis=0))
-
+        _pts.append(pts[pts[:, 0] > -50])
 
     query_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords))
     query_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(query_tsdf)[:, :3])
