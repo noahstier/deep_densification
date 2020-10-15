@@ -14,6 +14,14 @@ import decoders
 import pointnet
 import pointnet2
 
+'''
+to improve:
+    more scans
+    cbatchnorm
+    image feats
+    pointnet++
+'''
+
 _wandb = True
 
 scannet_dir = "/home/noah/data/scannet"
@@ -41,6 +49,10 @@ bce = torch.nn.BCEWithLogitsLoss()
 if _wandb:
     wandb.init(project="pcd_completion")
     wandb.watch(model)
+
+if False:
+    checkpoint = torch.load("models/test")
+    model.load_state_dict(checkpoint["model"])
 
 step = 0
 for epoch in itertools.count():

@@ -168,8 +168,6 @@ class Dataset(torch.utils.data.Dataset):
         m = np.mean(pts, axis=0)
         pts -= m
         query_coords -= m
-        pts /= [5, 5, .5]
-        query_coords /= [5, 5, .5]
 
         if self.split == "train":
             rotmat = scipy.spatial.transform.Rotation.from_rotvec(

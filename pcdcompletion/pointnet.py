@@ -20,6 +20,8 @@ class DumbPointnet(torch.nn.Module):
         )
 
     def forward(self, pts):
+        pts /= [5, 5, .5]
+        query_coords /= [5, 5, .5]
         return torch.max(self.mlp(pts), dim=1)[0]
 
 
