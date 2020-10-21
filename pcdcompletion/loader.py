@@ -23,7 +23,6 @@ class Dataset(torch.utils.data.Dataset):
         return len(self.scan_dirs)
 
     def __getitem__(self, index):
-        index = 0
         scan_dir = self.scan_dirs[index]
 
         posefile = os.path.join(scan_dir, "poses.npy")
@@ -145,12 +144,9 @@ class Dataset(torch.utils.data.Dataset):
         query_coords = query_coords[inds]
         query_tsdf = query_tsdf[inds]
 
-        pcd_center = np.mean(pts, axis=0)
-        pts -= pcd_center
-        query_coords -= pcd_center
-
         if self.augment:
-            angle = np.random.uniform(0, 2 * np.pi)  # np.pi * np.random.randint(4)
+            # angle = np.random.uniform(0, 2 * np.pi)
+            angle = np.pi / 2 * np.random.randint(4)
             rotmat = scipy.spatial.transform.Rotation.from_rotvec(
                 np.array([0, 0, 1]) * angle
             ).as_matrix()
@@ -159,7 +155,8 @@ class Dataset(torch.utils.data.Dataset):
             pts = (rotmat @ flipmat @ pts.T).T
             query_coords = (rotmat @ flipmat @ query_coords.T).T
 
-            pts += np.random.uniform(-0.005, 0.005, size=pts.shape)
+            pts += np.random.uniform(-0.001, 0.001, size=pts.shape)
+            query_coords += np.random.uniform(-0.001, 0.001, size=query_coords.shape)
 
             maxqueries = 2 ** 13
             if len(query_coords) > maxqueries:
@@ -184,6 +181,10 @@ class Dataset(torch.utils.data.Dataset):
                 n = maxpts - len(pts)
                 pts = np.concatenate((pts, -100 * np.ones((n, 3))), axis=0)
                 rgb = np.concatenate((rgb, -100 * np.ones((n, 3))), axis=0)
+
+        pcd_center = np.mean(pts, axis=0)
+        pts -= pcd_center
+        query_coords -= pcd_center
 
         batch = [
             pts.astype(np.float32),
@@ -248,9 +249,9 @@ if __name__ == "__main__":
 
     scan_dirs = sorted(glob.glob(os.path.join(config.scannet_dir, "*")))
 
-    dset = Dataset(scan_dirs[3:], n_imgs=17, augment=False, load_gt_mesh=True)
+    dset = Dataset(scan_dirs[3:], n_imgs=-1, augment=False, load_gt_mesh=True)
     self = dset
-    index = 0
+    index = 2
     (
         pts,
         rgb,

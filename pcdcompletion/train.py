@@ -1,3 +1,4 @@
+import datetime
 import glob
 import itertools
 import os
@@ -9,6 +10,7 @@ import torch
 import tqdm
 import wandb
 
+import common
 import config
 import loader
 import decoders
@@ -16,16 +18,15 @@ import pointnet
 import pointnet2
 
 """
-
 todo:
-    - divide by variance inside model: array([1.37907848, 2.33269393, 0.40424237])
-    - reduce initialization sensitivity: batchnorm?
-    - get test acc to match train acc during overfitting
 
+    - learn with translation
+    - learn with augmentation
+    - expand dataset
 
 to improve:
     more scans
-    cbatchnorm
+    cbatchnorm?
     image feats
     pointnet++
 """
@@ -38,26 +39,45 @@ scan_dirs = sorted(
     ]
 )
 
-train_dset = loader.Dataset(scan_dirs[3:], n_imgs=17, augment=True)
+train_dirs = [
+    scan_dirs[0],
+    scan_dirs[0],
+    scan_dirs[0],
+    scan_dirs[0],
+    scan_dirs[3],
+    scan_dirs[3],
+    scan_dirs[3],
+    scan_dirs[3],
+]
+test_dirs = [
+    scan_dirs[0],
+    scan_dirs[3],
+]
+
+train_dset = loader.Dataset(train_dirs, n_imgs=17, augment=True)
 train_loader = torch.utils.data.DataLoader(
     train_dset,
     batch_size=config.batch_size,
     shuffle=True,
     num_workers=config.num_workers,
     drop_last=True,
+    worker_init_fn=lambda worker_id: np.random.seed(),
 )
 
-test_dset = loader.Dataset(scan_dirs[3:6], n_imgs=17, augment=False)
+test_dset = loader.Dataset(test_dirs, n_imgs=17, augment=False)
+test_batch = test_dset[0]
 test_loader = torch.utils.data.DataLoader(
     test_dset,
     batch_size=1,
     shuffle=False,
     num_workers=2,
     drop_last=False,
+    worker_init_fn=lambda worker_id: np.random.seed(),
 )
 
+# encoder = pointnet.DumbPointnet(6, config.encoder_width)
 encoder = pointnet.DumbPointnet(6, config.encoder_width)
-decoder = decoders.Decoder(
+decoder = decoders.DecoderBatchNorm(
     dim=3,
     z_dim=0,
     c_dim=config.encoder_width,
@@ -79,7 +99,7 @@ else:
 
 
 if False:
-    checkpoint = torch.load("models/test")
+    checkpoint = torch.load("models/summer-sea-92")
     model.load_state_dict(checkpoint["model"])
 
 step = 0
@@ -105,6 +125,7 @@ for epoch in itertools.count():
         query_pcd.colors = o3d.utility.Vector3dVector(
             plt.cm.jet(query_tsdf[j, query_inds] * .5 + .5)[:, :3]
         )
+        o3d.visualization.draw_geometries([pcd])
         o3d.visualization.draw_geometries([pcd, query_pcd])
         """
 
@@ -116,11 +137,14 @@ for epoch in itertools.count():
         query_coords = query_coords.cuda()
         near_inds = query_tsdf < 1
 
-        pointnet_inputs = torch.cat((pts, rgb), dim=-1)
-
         opt.zero_grad()
 
-        pointnet_feats = encoder(pointnet_inputs)
+        pt_inds = pts[..., 0] > -50
+        pointnet_feats = []
+        for j in range(len(pt_inds)):
+            pointnet_inputs = torch.cat((pts[j, pt_inds[j]], rgb[j, pt_inds[j]]), dim=-1)
+            pointnet_feats.append(encoder(pointnet_inputs[None]))
+        pointnet_feats = torch.cat(pointnet_feats, dim=0)
 
         logits = decoder(query_coords, None, pointnet_feats)
 
@@ -160,6 +184,7 @@ for epoch in itertools.count():
             plt.cm.jet(query_tsdf[j, query_inds] * .5 + .5)[:, :3]
         )
         o3d.visualization.draw_geometries([pcd, query_pcd])
+        o3d.visualization.draw_geometries([pcd])
         """
 
         query_occ = query_tsdf < 0
@@ -170,8 +195,13 @@ for epoch in itertools.count():
         query_coords = query_coords.cuda()
         near_inds = query_tsdf < 1
 
-        pointnet_inputs = torch.cat((pts, rgb), dim=-1)
-        pointnet_feats = encoder(pointnet_inputs)
+        pt_inds = pts[..., 0] > -50
+        pointnet_feats = []
+        for j in range(len(pt_inds)):
+            pointnet_inputs = torch.cat((pts[j, pt_inds[j]], rgb[j, pt_inds[j]]), dim=-1)
+            pointnet_feats.append(encoder(pointnet_inputs[None]))
+        pointnet_feats = torch.cat(pointnet_feats, dim=0)
+
         logits = decoder(query_coords, None, pointnet_feats)
         loss = bce(logits[near_inds], query_occ[near_inds].float())
 
@@ -185,13 +215,33 @@ for epoch in itertools.count():
     test_loss = loss_num / denom
     test_acc = acc_num / denom
 
+    wandb_logs = {}
+
+    pts, rgb, _, _ = test_batch
+    pts = torch.Tensor(pts).cuda()
+    rgb = torch.Tensor(rgb).cuda()
+    try:
+        verts, faces, preds, query_coords = common.predict_mesh(model, pts, rgb)
+        test_mesh_img = common.render_mesh(verts, faces)
+        mesh = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(verts), o3d.utility.Vector3iVector(faces)
+        )
+        mesh.compute_vertex_normals()
+        mesh_dir = os.path.join('meshes', model_name)
+        os.makedirs(mesh_dir, exist_ok=True)
+        o3d.io.write_triangle_mesh(os.path.join(mesh_dir, str(step).zfill(6) + '.ply'), mesh)
+        wandb_logs['test/mesh'] = wandb.Image(test_mesh_img)
+    except Exception as e:
+        print('meshing failed', e)
+
     if config.wandb:
         wandb.log(
             {
-                "train loss": train_loss,
-                "train acc": train_acc,
-                "test loss": test_loss,
-                "test acc": test_acc,
+                **wandb_logs,
+                "train/loss": train_loss,
+                "train/acc": train_acc,
+                "test/loss": test_loss,
+                "test/acc": test_acc,
             },
             step=step,
         )

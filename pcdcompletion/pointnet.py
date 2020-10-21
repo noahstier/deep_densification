@@ -38,10 +38,12 @@ class DumbPointnet(torch.nn.Module):
             torch.nn.Linear(128, feat_width),
             torch.nn.ReLU(),
         )
-        # self.meh = torch.Tensor([5, 5, .5])
+        self.var = torch.nn.Parameter(
+            torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
+        )
 
     def forward(self, pts):
-        # pts = torch.cat((pts[..., :3] / self.meh, pts[..., 3:]), dim=-1)
+        pts = torch.cat((pts[..., :3] / self.var, pts[..., 3:]), dim=-1)
         return torch.max(self.mlp(pts), dim=1)[0]
 
 
@@ -152,7 +154,7 @@ class PointNetfeat(nn.Module):
         self.stn = STN3d(use_bn=use_bn)
         self.conv1 = torch.nn.Conv1d(3, 64, 1)
         self.conv2 = torch.nn.Conv1d(64, 128, 1)
-        '''
+        """
         if use_bn:
             self.more_convs = torch.nn.Sequential(
                 torch.nn.Conv1d(128, 128, 1),
@@ -174,7 +176,7 @@ class PointNetfeat(nn.Module):
                 torch.nn.Conv1d(128, 128, 1),
                 torch.nn.ReLU(),
             )
-        '''
+        """
         self.conv3 = torch.nn.Conv1d(128, 1024, 1)
         self.use_bn = use_bn
         if self.use_bn:
