@@ -16,6 +16,13 @@ import pointnet
 import pointnet2
 
 """
+
+todo:
+    - divide by variance inside model: array([1.37907848, 2.33269393, 0.40424237])
+    - reduce initialization sensitivity: batchnorm?
+    - get test acc to match train acc during overfitting
+
+
 to improve:
     more scans
     cbatchnorm
@@ -31,19 +38,32 @@ scan_dirs = sorted(
     ]
 )
 
-train_dset = loader.Dataset(scan_dirs[3:], 10, split="train")
+train_dset = loader.Dataset(scan_dirs[3:], n_imgs=17, augment=True)
 train_loader = torch.utils.data.DataLoader(
-    train_dset, batch_size=3, shuffle=True, num_workers=config.num_workers, drop_last=True
+    train_dset,
+    batch_size=config.batch_size,
+    shuffle=True,
+    num_workers=config.num_workers,
+    drop_last=True,
 )
 
-np.random.seed(0)
-test_dset = loader.Dataset(scan_dirs[:3], 50, split="test")
-test_batch = test_dset[0]
+test_dset = loader.Dataset(scan_dirs[3:6], n_imgs=17, augment=False)
+test_loader = torch.utils.data.DataLoader(
+    test_dset,
+    batch_size=1,
+    shuffle=False,
+    num_workers=2,
+    drop_last=False,
+)
 
-# encoder = pointnet.PointNetfeat(use_bn=False)
-encoder = pointnet.DumbPointnet(6)
-# encoder = pointnet.PointNetPP({"model.use_xyz": True})
-decoder = decoders.Decoder(dim=3, z_dim=0, c_dim=1024, hidden_size=256, leaky=False)
+encoder = pointnet.DumbPointnet(6, config.encoder_width)
+decoder = decoders.Decoder(
+    dim=3,
+    z_dim=0,
+    c_dim=config.encoder_width,
+    hidden_size=config.decoder_width,
+    leaky=False,
+)
 
 model = torch.nn.ModuleDict({"encoder": encoder, "decoder": decoder}).cuda()
 
@@ -53,6 +73,10 @@ bce = torch.nn.BCEWithLogitsLoss()
 if config.wandb:
     wandb.init(project="pcd_completion")
     wandb.watch(model)
+    model_name = wandb.run.name
+else:
+    model_name = str(datetime.datetime.now()).replace(' ', '_')
+
 
 if False:
     checkpoint = torch.load("models/test")
@@ -70,13 +94,16 @@ for epoch in itertools.count():
         pts, rgb, query_coords, query_tsdf = batch
 
         """
-        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[0]))
-        pcd.colors = o3d.utility.Vector3dVector(rgb[0])
+        j = 0
+        pt_inds = pts[j, :, 0] > -50
+        query_inds = query_tsdf[j] < 1
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[j, pt_inds]))
+        pcd.colors = o3d.utility.Vector3dVector(rgb[j, pt_inds])
         query_pcd = o3d.geometry.PointCloud(
-            o3d.utility.Vector3dVector(query_coords[0, query_tsdf[0] < 1])
+            o3d.utility.Vector3dVector(query_coords[j, query_inds])
         )
         query_pcd.colors = o3d.utility.Vector3dVector(
-            plt.cm.jet(query_tsdf[0, query_tsdf[0] < 1])[:, :3]
+            plt.cm.jet(query_tsdf[j, query_inds] * .5 + .5)[:, :3]
         )
         o3d.visualization.draw_geometries([pcd, query_pcd])
         """
@@ -87,14 +114,13 @@ for epoch in itertools.count():
         pts = pts.cuda()
         rgb = rgb.cuda()
         query_coords = query_coords.cuda()
+        near_inds = query_tsdf < 1
 
         pointnet_inputs = torch.cat((pts, rgb), dim=-1)
 
         opt.zero_grad()
 
         pointnet_feats = encoder(pointnet_inputs)
-
-        near_inds = query_tsdf < 1
 
         logits = decoder(query_coords, None, pointnet_feats)
 
@@ -110,41 +136,67 @@ for epoch in itertools.count():
         loss_num += (loss * n_examples).item()
         denom += n_examples.item()
 
-    model.eval()
-    (
-        pts,
-        rgb,
-        query_coords,
-        query_tsdf,
-        gt_mesh_verts,
-        gt_mesh_faces,
-        gt_mesh_vertex_colors,
-    ) = test_batch
-    pts = torch.Tensor(pts).cuda()[None]
-    rgb = torch.Tensor(rgb).cuda()[None]
-    query_coords = torch.Tensor(query_coords).cuda()[None]
-    query_tsdf = torch.Tensor(query_tsdf).cuda()[None]
-    query_occ = query_tsdf < 0
+    train_loss = loss_num / denom
+    train_acc = acc_num / denom
 
-    pointnet_inputs = torch.cat((pts, rgb), dim=-1)
-    pointnet_feats = encoder(pointnet_inputs)
-    logits = decoder(query_coords, None, pointnet_feats)
-    test_loss = bce(logits, query_occ.float())
-    preds = torch.round(torch.sigmoid(logits))
-    test_acc = torch.mean((preds.bool() == query_occ).float())
+    model.eval()
+
+    acc_num = 0
+    loss_num = 0
+    denom = 0
+    for i, batch in enumerate(tqdm.tqdm(test_loader)):
+        pts, rgb, query_coords, query_tsdf = batch
+
+        """
+        j = 0
+        pt_inds = pts[j, :, 0] > -50
+        query_inds = query_tsdf[j] < 1
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts[j, pt_inds]))
+        pcd.colors = o3d.utility.Vector3dVector(rgb[j, pt_inds])
+        query_pcd = o3d.geometry.PointCloud(
+            o3d.utility.Vector3dVector(query_coords[j, query_inds])
+        )
+        query_pcd.colors = o3d.utility.Vector3dVector(
+            plt.cm.jet(query_tsdf[j, query_inds] * .5 + .5)[:, :3]
+        )
+        o3d.visualization.draw_geometries([pcd, query_pcd])
+        """
+
+        query_occ = query_tsdf < 0
+
+        query_occ = query_occ.cuda()
+        pts = pts.cuda()
+        rgb = rgb.cuda()
+        query_coords = query_coords.cuda()
+        near_inds = query_tsdf < 1
+
+        pointnet_inputs = torch.cat((pts, rgb), dim=-1)
+        pointnet_feats = encoder(pointnet_inputs)
+        logits = decoder(query_coords, None, pointnet_feats)
+        loss = bce(logits[near_inds], query_occ[near_inds].float())
+
+        preds = torch.round(torch.sigmoid(logits))
+
+        n_examples = torch.sum(near_inds.float())
+        acc_num += torch.sum((preds.bool() == query_occ)[near_inds]).float().item()
+        loss_num += (loss * n_examples).item()
+        denom += n_examples.item()
+
+    test_loss = loss_num / denom
+    test_acc = acc_num / denom
 
     if config.wandb:
         wandb.log(
             {
-                "train loss": loss_num / denom,
-                "train acc": acc_num / denom,
-                "test loss": test_loss.item(),
-                "test acc": test_acc.item(),
+                "train loss": train_loss,
+                "train acc": train_acc,
+                "test loss": test_loss,
+                "test acc": test_acc,
             },
             step=step,
         )
 
     torch.save(
         {"model": model.state_dict(), "opt": opt.state_dict()},
-        os.path.join("models", "test"),
+        os.path.join("models", model_name)
     )

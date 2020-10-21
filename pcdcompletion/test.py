@@ -6,6 +6,7 @@ import open3d as o3d
 import skimage.measure
 import torch
 
+import config
 import loader
 import decoders
 import pointnet
@@ -44,17 +45,22 @@ scannet_dir = "/home/noah/data/scannet"
 scan_dirs = sorted(glob.glob(os.path.join(scannet_dir, "*")))
 
 # test_dset = loader.Dataset(scan_dirs[3:], 50, split="test")
-test_dset = loader.Dataset(scan_dirs, 10, split="test")
+test_dset = loader.Dataset(scan_dirs[3:], n_imgs=17, augment=True, load_gt_mesh=True)
 test_loader = torch.utils.data.DataLoader(
     test_dset, batch_size=1, shuffle=False
 )
 
-# encoder = pointnet.PointNetfeat(use_bn=False)
-encoder = pointnet.DumbPointnet(6)
-decoder = decoders.Decoder(dim=3, z_dim=0, c_dim=1024, hidden_size=256, leaky=False)
+encoder = pointnet.DumbPointnet(6, config.encoder_width)
+decoder = decoders.Decoder(
+    dim=3,
+    z_dim=0,
+    c_dim=config.encoder_width,
+    hidden_size=config.decoder_width,
+    leaky=False,
+)
 model = torch.nn.ModuleDict({"encoder": encoder, "decoder": decoder}).cuda()
 
-checkpoint = torch.load("models/test")
+checkpoint = torch.load("models/worthy-terrain-58")
 model.load_state_dict(checkpoint["model"])
 
 model.eval()
@@ -71,16 +77,53 @@ batch = next(iter(test_loader))
     gt_mesh_vertex_colors,
 ) = batch
 
+query_occ = query_tsdf < 0
+
+query_occ = query_occ.cuda()
+pts = pts.cuda()
+rgb = rgb.cuda()
+query_coords = query_coords.cuda()
+near_inds = query_tsdf < 1
+
+pointnet_inputs = torch.cat((pts, rgb), dim=-1)
+pointnet_feats = encoder(pointnet_inputs)
+logits = decoder(query_coords, None, pointnet_feats)
+loss = bce(logits[near_inds], query_occ[near_inds].float())
+
+preds = torch.round(torch.sigmoid(logits))
+
+n_examples = torch.sum(near_inds.float())
+acc_num += torch.sum((preds.bool() == query_occ)[near_inds]).float().item()
+loss_num += (loss * n_examples).item()
+denom += n_examples.item()
+
+
+
+
+
+
+
+
+
 j = 0
 pts = pts[j].cuda()
 rgb = rgb[j].cuda()
+
+
+
+
+
+
+
+
+
 verts, faces, preds, query_coords = predict_mesh(model, pts, rgb)
 
 pred_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords[0].cpu()))
 pred_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(preds[j])[:, :3])
 
 pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts.cpu()))
-pcd.colors = o3d.utility.Vector3dVector(rgb.cpu())
+pcd.colors = o3d.utility.Vector3dVector(rgb.cpu()/255)
 
 query_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords[j].cpu()))
 query_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(query_tsdf[j].cpu())[:, :3])

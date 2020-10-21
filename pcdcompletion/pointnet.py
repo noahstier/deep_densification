@@ -28,14 +28,14 @@ class PointNetPP(pointnet2.models.PointNet2ClassificationMSG):
 
 
 class DumbPointnet(torch.nn.Module):
-    def __init__(self, pt_dim):
+    def __init__(self, pt_dim, feat_width):
         super().__init__()
         self.mlp = torch.nn.Sequential(
             torch.nn.Linear(pt_dim, 128),
             torch.nn.ReLU(),
-            torch.nn.Linear(128, 512),
+            torch.nn.Linear(128, 128),
             torch.nn.ReLU(),
-            torch.nn.Linear(512, 1024),
+            torch.nn.Linear(128, feat_width),
             torch.nn.ReLU(),
         )
         # self.meh = torch.Tensor([5, 5, .5])

@@ -11,19 +11,19 @@ import torch
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, scan_dirs, n_imgs, split=None):
+    def __init__(self, scan_dirs, n_imgs=-1, augment=False, load_gt_mesh=False):
         super().__init__()
         self.scan_dirs = scan_dirs
         self.n_imgs = n_imgs
+        self.augment = augment
+        self.load_gt_mesh = load_gt_mesh
 
-        if split not in ["train", "test"]:
-            raise Exception()
-        self.split = split
 
     def __len__(self):
         return len(self.scan_dirs)
 
     def __getitem__(self, index):
+        index = 0
         scan_dir = self.scan_dirs[index]
 
         posefile = os.path.join(scan_dir, "poses.npy")
@@ -45,12 +45,16 @@ class Dataset(torch.utils.data.Dataset):
         poses = np.load(posefile)
 
         img_inds = np.arange(len(poses))
-        img_inds = np.random.choice(img_inds, size=self.n_imgs, replace=False)
+        if self.n_imgs != -1:
+            img_inds = np.random.choice(img_inds, size=self.n_imgs, replace=False)
 
-        img_dset = h5py.File(os.path.join(scan_dir, 'imgs.h5'), 'r')
-        depth_img_dset = img_dset['depth_imgs']
-        rgb_img_dset = img_dset['rgb_imgs']
-        depth_imgs = np.stack([depth_img_dset[i] for i in img_inds], axis=0).astype(np.float32) / 1000
+        img_dset = h5py.File(os.path.join(scan_dir, "imgs.h5"), "r")
+        depth_img_dset = img_dset["depth_imgs"]
+        rgb_img_dset = img_dset["rgb_imgs"]
+        depth_imgs = (
+            np.stack([depth_img_dset[i] for i in img_inds], axis=0).astype(np.float32)
+            / 1000
+        )
         rgb_imgs = np.stack([rgb_img_dset[i] for i in img_inds], axis=0)
 
         imheight, imwidth = depth_imgs[0].shape[:2]
@@ -92,19 +96,33 @@ class Dataset(torch.utils.data.Dataset):
             rgb.append(colors)
 
         pts = np.concatenate(pts, axis=0)
-        rgb = np.concatenate(rgb, axis=0)
+        rgb = np.concatenate(rgb, axis=0) / 255
+
+        minbounds = np.min(pts, axis=0)
+        res = 0.1
+        inds = np.floor((pts - minbounds) / res).astype(np.uint8)
+        a = np.arange(len(pts), dtype=np.int32)
+        vol = np.zeros(np.max(inds, axis=0) + 1, dtype=np.int32)
+        vol[inds[:, 0], inds[:, 1], inds[:, 2]] = a
+        inds = np.argwhere(vol > 0)
+        inds = vol[inds[:, 0], inds[:, 1], inds[:, 2]]
+        pts = pts[inds]
+        rgb = rgb[inds]
+
+        """
+        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts.astype(np.float64)))
+        pcd.colors = o3d.utility.Vector3dVector(rgb)
+        sparse_pcd = pcd.voxel_down_sample(0.1)
+        pts = np.asarray(sparse_pcd.points).astype(np.float32)
+        rgb = np.asarray(sparse_pcd.colors).astype(np.float32)
+        """
 
         inds = (pts < extents[1]) & (pts > extents[0])
         inds = inds[:, 0] & inds[:, 1] & inds[:, 2]
 
-        pts = pts[inds]
-        rgb = rgb[inds]
-
-        pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts.astype(np.float64)))
-        pcd.colors = o3d.utility.Vector3dVector(rgb / 255)
-        sparse_pcd = pcd.voxel_down_sample(0.1)
-        pts = np.asarray(sparse_pcd.points).astype(np.float32)
-        rgb = np.asarray(sparse_pcd.colors).astype(np.float32)
+        if not np.all(inds):
+            pts = pts[inds]
+            rgb = rgb[inds]
 
         inds = np.meshgrid(
             np.arange(tsdf_vol.shape[1]),
@@ -127,12 +145,12 @@ class Dataset(torch.utils.data.Dataset):
         query_coords = query_coords[inds]
         query_tsdf = query_tsdf[inds]
 
-        m = np.mean(pts, axis=0)
-        pts -= m
-        query_coords -= m
+        pcd_center = np.mean(pts, axis=0)
+        pts -= pcd_center
+        query_coords -= pcd_center
 
-        if self.split == "train":
-            angle = np.random.uniform(0, 2 * np.pi) # np.pi * np.random.randint(4)
+        if self.augment:
+            angle = np.random.uniform(0, 2 * np.pi)  # np.pi * np.random.randint(4)
             rotmat = scipy.spatial.transform.Rotation.from_rotvec(
                 np.array([0, 0, 1]) * angle
             ).as_matrix()
@@ -141,9 +159,22 @@ class Dataset(torch.utils.data.Dataset):
             pts = (rotmat @ flipmat @ pts.T).T
             query_coords = (rotmat @ flipmat @ query_coords.T).T
 
-            pts += np.random.uniform(-.005, .005, size=pts.shape)
+            pts += np.random.uniform(-0.005, 0.005, size=pts.shape)
 
-            maxpts = 2 ** 14
+            maxqueries = 2 ** 13
+            if len(query_coords) > maxqueries:
+                inds = np.arange(len(query_coords), dtype=int)
+                inds = np.random.choice(inds, replace=False, size=maxqueries)
+                query_coords = query_coords[inds]
+                query_tsdf = query_tsdf[inds]
+            else:
+                n = maxqueries - len(query_coords)
+                query_coords = np.concatenate(
+                    (query_coords, -100 * np.ones((n, 3))), axis=0
+                )
+                query_tsdf = np.concatenate((query_tsdf, 100 * np.ones(n)), axis=0)
+
+            maxpts = 2 ** 13
             if len(pts) > maxpts:
                 inds = np.arange(len(pts), dtype=int)
                 inds = np.random.choice(inds, replace=False, size=maxpts)
@@ -154,17 +185,6 @@ class Dataset(torch.utils.data.Dataset):
                 pts = np.concatenate((pts, -100 * np.ones((n, 3))), axis=0)
                 rgb = np.concatenate((rgb, -100 * np.ones((n, 3))), axis=0)
 
-            maxqueries = 2 ** 13
-            if len(query_coords) > maxqueries:
-                inds = np.arange(len(query_coords), dtype=int)
-                inds = np.random.choice(inds, replace=False, size=maxqueries)
-                query_coords = query_coords[inds]
-                query_tsdf = query_tsdf[inds]
-            else:
-                n = maxqueries - len(query_coords)
-                query_coords = np.concatenate((query_coords, -100 * np.ones((n, 3))), axis=0)
-                query_tsdf = np.concatenate((query_tsdf, 100 * np.ones(n)), axis=0)
-
         batch = [
             pts.astype(np.float32),
             rgb.astype(np.float32),
@@ -172,11 +192,13 @@ class Dataset(torch.utils.data.Dataset):
             query_tsdf,
         ]
 
-        if self.split == "test":
+        if self.load_gt_mesh:
             gt_mesh_verts = npz_16["gt_mesh_verts"]
             gt_mesh_faces = npz_16["gt_mesh_faces"]
             gt_mesh_vertex_colors = npz_16["gt_mesh_vertex_colors"]
-            # gt_mesh_verts += 10
+            gt_mesh_verts -= pcd_center
+            if self.augment:
+                gt_mesh_verts = (rotmat @ flipmat @ gt_mesh_verts.T).T
             batch += [
                 gt_mesh_verts,
                 gt_mesh_faces,
@@ -222,23 +244,50 @@ class Dataset(torch.utils.data.Dataset):
 
 if __name__ == "__main__":
     import config
+    import tqdm
+
     scan_dirs = sorted(glob.glob(os.path.join(config.scannet_dir, "*")))
 
-    dset = Dataset(scan_dirs, 10, split="train")
+    dset = Dataset(scan_dirs[3:], n_imgs=17, augment=False, load_gt_mesh=True)
     self = dset
     index = 0
-    _pts = []
-    for i in tqdm.trange(100):
-        pts, rgb, query_coords, query_tsdf = dset[i]
-        _pts.append(pts[pts[:, 0] > -50])
+    (
+        pts,
+        rgb,
+        query_coords,
+        query_tsdf,
+        gt_mesh_verts,
+        gt_mesh_faces,
+        gt_mesh_vertex_colors,
+    ) = dset[index]
 
-    query_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords))
-    query_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(query_tsdf)[:, :3])
+    gt_mesh_faces = np.concatenate((gt_mesh_faces, gt_mesh_faces[:, [2, 1, 0]]), axis=0)
+    gt_mesh = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(gt_mesh_verts),
+        o3d.utility.Vector3iVector(gt_mesh_faces),
+    )
+    gt_mesh.vertex_colors = o3d.utility.Vector3dVector(gt_mesh_vertex_colors / 255)
+    gt_mesh.compute_vertex_normals()
+
+
+    inds = pts[:, 0] > -50
+    pts = pts[inds]
+    rgb = rgb[inds]
+
+    inds = query_tsdf < 50
+    query_coords = query_coords[inds]
+    query_tsdf = query_tsdf[inds]
+
+    tsdf_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords))
+    tsdf_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(query_tsdf * .5 + .5)[:, :3])
+
+    occ_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords))
+    occ_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet((query_tsdf < 0).astype(np.float32))[:, :3])
 
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
     pcd.colors = o3d.utility.Vector3dVector(rgb)
 
-    geoms = [pcd, query_pcd]
+    geoms = [gt_mesh, pcd, tsdf_pcd, occ_pcd]
     visibility = [True] * len(geoms)
 
     def toggle_geom(vis, geom_ind):
