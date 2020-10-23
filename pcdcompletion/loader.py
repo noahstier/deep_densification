@@ -11,13 +11,14 @@ import torch
 
 
 class Dataset(torch.utils.data.Dataset):
-    def __init__(self, scan_dirs, n_imgs=-1, augment=False, load_gt_mesh=False):
+    def __init__(self, scan_dirs, n_imgs=-1, augment=False, load_gt_mesh=False, maxqueries=-1, maxpts=-1):
         super().__init__()
         self.scan_dirs = scan_dirs
         self.n_imgs = n_imgs
         self.augment = augment
         self.load_gt_mesh = load_gt_mesh
-
+        self.maxpts = maxpts
+        self.maxqueries = maxqueries
 
     def __len__(self):
         return len(self.scan_dirs)
@@ -95,11 +96,11 @@ class Dataset(torch.utils.data.Dataset):
             rgb.append(colors)
 
         pts = np.concatenate(pts, axis=0)
-        rgb = np.concatenate(rgb, axis=0) / 255
+        rgb = np.concatenate(rgb, axis=0)
 
         minbounds = np.min(pts, axis=0)
         res = 0.1
-        inds = np.floor((pts - minbounds) / res).astype(np.uint8)
+        inds = np.floor((pts - minbounds) / res).astype(np.int32)
         a = np.arange(len(pts), dtype=np.int32)
         vol = np.zeros(np.max(inds, axis=0) + 1, dtype=np.int32)
         vol[inds[:, 0], inds[:, 1], inds[:, 2]] = a
@@ -112,8 +113,8 @@ class Dataset(torch.utils.data.Dataset):
         pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts.astype(np.float64)))
         pcd.colors = o3d.utility.Vector3dVector(rgb)
         sparse_pcd = pcd.voxel_down_sample(0.1)
-        pts = np.asarray(sparse_pcd.points).astype(np.float32)
-        rgb = np.asarray(sparse_pcd.colors).astype(np.float32)
+        _pts = np.asarray(sparse_pcd.points).astype(np.float32)
+        _rgb = np.asarray(sparse_pcd.colors).astype(np.float32)
         """
 
         inds = (pts < extents[1]) & (pts > extents[0])
@@ -158,33 +159,41 @@ class Dataset(torch.utils.data.Dataset):
             pts += np.random.uniform(-0.001, 0.001, size=pts.shape)
             query_coords += np.random.uniform(-0.001, 0.001, size=query_coords.shape)
 
-            maxqueries = 2 ** 13
-            if len(query_coords) > maxqueries:
+        if self.maxqueries > -1:
+            if len(query_coords) > self.maxqueries:
                 inds = np.arange(len(query_coords), dtype=int)
-                inds = np.random.choice(inds, replace=False, size=maxqueries)
+                inds = np.random.choice(inds, replace=False, size=self.maxqueries)
                 query_coords = query_coords[inds]
                 query_tsdf = query_tsdf[inds]
             else:
-                n = maxqueries - len(query_coords)
+                n = self.maxqueries - len(query_coords)
                 query_coords = np.concatenate(
                     (query_coords, -100 * np.ones((n, 3))), axis=0
                 )
                 query_tsdf = np.concatenate((query_tsdf, 100 * np.ones(n)), axis=0)
 
-            maxpts = 2 ** 13
-            if len(pts) > maxpts:
+        if self.maxpts > -1:
+            if len(pts) > self.maxpts:
                 inds = np.arange(len(pts), dtype=int)
-                inds = np.random.choice(inds, replace=False, size=maxpts)
+                inds = np.random.choice(inds, replace=False, size=self.maxpts)
                 pts = pts[inds]
                 rgb = rgb[inds]
             else:
-                n = maxpts - len(pts)
+                n = self.maxpts - len(pts)
                 pts = np.concatenate((pts, -100 * np.ones((n, 3))), axis=0)
                 rgb = np.concatenate((rgb, -100 * np.ones((n, 3))), axis=0)
 
         pcd_center = np.mean(pts, axis=0)
         pts -= pcd_center
         query_coords -= pcd_center
+
+        # maxnorm = np.max(np.linalg.norm(pts, axis=1))
+        # maxnorm = np.percentile(np.linalg.norm(pts, axis=1), 99)
+        # maxnorm = 5
+        # pts /= maxnorm
+        # query_coords /= maxnorm
+
+        rgb = rgb.astype(np.float32) / 255
 
         batch = [
             pts.astype(np.float32),
@@ -198,6 +207,7 @@ class Dataset(torch.utils.data.Dataset):
             gt_mesh_faces = npz_16["gt_mesh_faces"]
             gt_mesh_vertex_colors = npz_16["gt_mesh_vertex_colors"]
             gt_mesh_verts -= pcd_center
+            # gt_mesh_verts /= maxnorm
             if self.augment:
                 gt_mesh_verts = (rotmat @ flipmat @ gt_mesh_verts.T).T
             batch += [
@@ -249,9 +259,9 @@ if __name__ == "__main__":
 
     scan_dirs = sorted(glob.glob(os.path.join(config.scannet_dir, "*")))
 
-    dset = Dataset(scan_dirs[3:], n_imgs=-1, augment=False, load_gt_mesh=True)
+    dset = Dataset(scan_dirs, n_imgs=-1, augment=False, load_gt_mesh=True, maxpts=-1, maxqueries=-1)
     self = dset
-    index = 2
+    index = 0
     (
         pts,
         rgb,
@@ -262,6 +272,21 @@ if __name__ == "__main__":
         gt_mesh_vertex_colors,
     ) = dset[index]
 
+    maxnorms = []
+    for index in tqdm.trange(8):
+        (
+            pts,
+            rgb,
+            query_coords,
+            query_tsdf,
+            gt_mesh_verts,
+            gt_mesh_faces,
+            gt_mesh_vertex_colors,
+        ) = dset[index]
+        maxnorm = np.max(np.linalg.norm(pts, axis=1))
+        maxnorms.append(maxnorm)
+
+
     gt_mesh_faces = np.concatenate((gt_mesh_faces, gt_mesh_faces[:, [2, 1, 0]]), axis=0)
     gt_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(gt_mesh_verts),
@@ -269,7 +294,6 @@ if __name__ == "__main__":
     )
     gt_mesh.vertex_colors = o3d.utility.Vector3dVector(gt_mesh_vertex_colors / 255)
     gt_mesh.compute_vertex_normals()
-
 
     inds = pts[:, 0] > -50
     pts = pts[inds]
@@ -280,10 +304,14 @@ if __name__ == "__main__":
     query_tsdf = query_tsdf[inds]
 
     tsdf_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords))
-    tsdf_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(query_tsdf * .5 + .5)[:, :3])
+    tsdf_pcd.colors = o3d.utility.Vector3dVector(
+        plt.cm.jet(query_tsdf * 0.5 + 0.5)[:, :3]
+    )
 
     occ_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords))
-    occ_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet((query_tsdf < 0).astype(np.float32))[:, :3])
+    occ_pcd.colors = o3d.utility.Vector3dVector(
+        plt.cm.jet((query_tsdf < 0).astype(np.float32))[:, :3]
+    )
 
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts))
     pcd.colors = o3d.utility.Vector3dVector(rgb)

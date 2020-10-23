@@ -27,6 +27,35 @@ class PointNetPP(pointnet2.models.PointNet2ClassificationMSG):
         return features.squeeze(-1)
 
 
+class DumbPointnetBatchNorm(torch.nn.Module):
+    def __init__(self, pt_dim, feat_width, bnm=.1):
+        super().__init__()
+        self.conv1 = torch.nn.Conv1d(pt_dim, 128, 1)
+        self.conv2 = torch.nn.Conv1d(128, 128, 1)
+        self.conv3 = torch.nn.Conv1d(128, feat_width, 1)
+        self.bn1 = nn.BatchNorm1d(128, momentum=bnm)
+        self.bn2 = nn.BatchNorm1d(128, momentum=bnm)
+        self.bn3 = nn.BatchNorm1d(feat_width, momentum=bnm)
+
+        self.relu = torch.nn.functional.relu
+
+        self.var = torch.nn.Parameter(
+            torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
+        )
+
+    def forward(self, pts):
+        x = torch.cat((pts[..., :3] / self.var, pts[..., 3:]), dim=-1)
+        x = x.transpose(1, 2)
+        # x = self.relu(self.conv1(x))
+        # x = self.relu(self.conv2(x))
+        # x = self.relu(self.conv3(x))
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.relu(self.bn3(self.conv3(x)))
+        x, _ = torch.max(x, dim=2)
+        return x
+
+
 class DumbPointnet(torch.nn.Module):
     def __init__(self, pt_dim, feat_width):
         super().__init__()
@@ -38,13 +67,19 @@ class DumbPointnet(torch.nn.Module):
             torch.nn.Linear(128, feat_width),
             torch.nn.ReLU(),
         )
-        self.var = torch.nn.Parameter(
-            torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
-        )
+
+        # self.var = torch.nn.Parameter(
+        #     torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
+        # )
+        # self.var = torch.nn.Parameter(
+        #     torch.Tensor([5, 5, 5]), requires_grad=False
+        # )
 
     def forward(self, pts):
-        pts = torch.cat((pts[..., :3] / self.var, pts[..., 3:]), dim=-1)
-        return torch.max(self.mlp(pts), dim=1)[0]
+        x = pts
+        x = self.mlp(x)
+        x, _ = torch.max(x, dim=1)
+        return x
 
 
 class STN3d(nn.Module):

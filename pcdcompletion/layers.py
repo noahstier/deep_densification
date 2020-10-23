@@ -119,7 +119,7 @@ class ResnetBlockConv1d(nn.Module):
         size_h (int): hidden dimension
     """
 
-    def __init__(self, size_in, size_h=None, size_out=None):
+    def __init__(self, size_in, size_h=None, size_out=None, bnm=.1):
         super().__init__()
         # Attributes
         if size_h is None:
@@ -131,8 +131,8 @@ class ResnetBlockConv1d(nn.Module):
         self.size_h = size_h
         self.size_out = size_out
         # Submodules
-        self.bn_0 = nn.BatchNorm1d(size_in)
-        self.bn_1 = nn.BatchNorm1d(size_h)
+        self.bn_0 = nn.BatchNorm1d(size_in, momentum=bnm)
+        self.bn_1 = nn.BatchNorm1d(size_h, momentum=bnm)
 
         self.fc_0 = nn.Conv1d(size_in, size_h, 1)
         self.fc_1 = nn.Conv1d(size_h, size_out, 1)

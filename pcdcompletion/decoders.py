@@ -10,6 +10,73 @@ from layers import (
 )
 
 
+class Decoder2(nn.Module):
+    """ Decoder class.
+
+    It does not perform any form of normalization.
+
+    Args:
+        dim (int): input dimension
+        z_dim (int): dimension of latent code z
+        c_dim (int): dimension of latent conditioned code c
+        hidden_size (int): hidden size of Decoder network
+        leaky (bool): whether to use leaky ReLUs
+    """
+
+    def __init__(self, dim=3, z_dim=128, c_dim=128, hidden_size=128, leaky=False):
+        super().__init__()
+        self.z_dim = z_dim
+        self.c_dim = c_dim
+
+        # Submodules
+        self.fc_p = nn.Linear(dim, hidden_size)
+
+        if not z_dim == 0:
+            self.fc_z = nn.Linear(z_dim, hidden_size)
+
+        if not c_dim == 0:
+            self.fc_c = nn.Linear(c_dim, hidden_size)
+
+        self.res_blocks = torch.nn.Sequential(
+            *[ResnetBlockFC(hidden_size) for _ in range(5)]
+        )
+
+        self.fc = nn.Linear(hidden_size + c_dim, hidden_size)
+
+        self.fc_out = nn.Linear(hidden_size, 1)
+
+        if not leaky:
+            self.actvn = F.relu
+        else:
+            self.actvn = lambda x: F.leaky_relu(x, 0.2)
+
+        self.std = nn.Parameter(
+            torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
+        )
+
+    def forward(self, p, z, c=None, **kwargs):
+        batch_size, T, D = p.size()
+
+        p = p / self.std
+
+        net = self.fc_p(p)
+
+        if self.z_dim != 0:
+            net_z = self.fc_z(z).unsqueeze(1)
+            net = net + net_z
+
+        if self.c_dim != 0:
+            net = torch.cat((net, c[:, None].repeat(1, net.shape[1], 1)), dim=-1)
+
+        net = self.fc(net)
+        net = self.res_blocks(net)
+
+        out = self.fc_out(self.actvn(net))
+        out = out.squeeze(-1)
+
+        return out
+
+
 class Decoder(nn.Module):
     """ Decoder class.
 
@@ -38,7 +105,7 @@ class Decoder(nn.Module):
             self.fc_c = nn.Linear(c_dim, hidden_size)
 
         self.res_blocks = torch.nn.Sequential(
-            *[ResnetBlockFC(hidden_size) for _ in range(7)]
+            *[ResnetBlockFC(hidden_size) for _ in range(5)]
         )
 
         self.fc_out = nn.Linear(hidden_size, 1)
@@ -48,14 +115,14 @@ class Decoder(nn.Module):
         else:
             self.actvn = lambda x: F.leaky_relu(x, 0.2)
 
-        self.var = nn.Parameter(
+        self.std = nn.Parameter(
             torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
         )
 
     def forward(self, p, z, c=None, **kwargs):
         batch_size, T, D = p.size()
 
-        p = p / self.var
+        p = p / self.std
 
         net = self.fc_p(p)
 
@@ -66,7 +133,6 @@ class Decoder(nn.Module):
         if self.c_dim != 0:
             net_c = self.fc_c(c).unsqueeze(1)
             net = net + net_c
-            # net = torch.cat((net, net_c.repeat(1, net.shape[1], 1)), dim=-1)
 
         net = self.res_blocks(net)
 
@@ -258,7 +324,7 @@ class DecoderBatchNorm(nn.Module):
         leaky (bool): whether to use leaky ReLUs
     """
 
-    def __init__(self, dim=3, z_dim=128, c_dim=128, hidden_size=256, leaky=False):
+    def __init__(self, dim=3, z_dim=128, c_dim=128, hidden_size=256, leaky=False, bnm=.1):
         super().__init__()
         self.z_dim = z_dim
         self.c_dim = c_dim
@@ -270,12 +336,12 @@ class DecoderBatchNorm(nn.Module):
         if self.c_dim != 0:
             self.fc_c = nn.Linear(c_dim, hidden_size)
         self.fc_p = nn.Conv1d(dim, hidden_size, 1)
-        self.block0 = ResnetBlockConv1d(hidden_size)
-        # self.block0 = ResnetBlockConv1d(hidden_size * 2, size_out=hidden_size)
-        self.block1 = ResnetBlockConv1d(hidden_size)
-        self.block2 = ResnetBlockConv1d(hidden_size)
-        self.block3 = ResnetBlockConv1d(hidden_size)
-        self.block4 = ResnetBlockConv1d(hidden_size)
+
+        self.res_blocks = torch.nn.Sequential(
+            *[ResnetBlockConv1d(hidden_size, bnm=bnm) for _ in range(5)]
+        )
+
+        self.fc = nn.Conv1d(hidden_size + c_dim, hidden_size, 1)
 
         self.var = nn.Parameter(
             torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
@@ -291,7 +357,6 @@ class DecoderBatchNorm(nn.Module):
             self.actvn = lambda x: F.leaky_relu(x, 0.2)
 
     def forward(self, p, z, c, **kwargs):
-        p = p / self.var
         p = p.transpose(1, 2)
         batch_size, D, T = p.size()
         net = self.fc_p(p)
@@ -301,15 +366,13 @@ class DecoderBatchNorm(nn.Module):
             net = net + net_z
 
         if self.c_dim != 0:
-            net_c = self.fc_c(c).unsqueeze(2)
-            net = net + net_c
-            # net = torch.cat((net, net_c.repeat(1, net.shape[1], 1)), dim=-1)
+            # net_c = self.fc_c(c).unsqueeze(2)
+            # net = net + net_c
 
-        net = self.block0(net)
-        net = self.block1(net)
-        net = self.block2(net)
-        net = self.block3(net)
-        net = self.block4(net)
+            net = torch.cat((net, c[:, :, None].repeat(1, 1, net.shape[-1])), dim=1)
+            net = self.fc(net)
+
+        net = self.res_blocks(net)
 
         out = self.fc_out(self.actvn(self.bn(net)))
         out = out.squeeze(1)

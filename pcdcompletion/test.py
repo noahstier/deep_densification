@@ -15,9 +15,7 @@ scannet_dir = "/home/noah/data/scannet"
 scan_dirs = sorted(glob.glob(os.path.join(scannet_dir, "*")))
 
 test_dset = loader.Dataset(scan_dirs[:3], n_imgs=17, augment=True, load_gt_mesh=True)
-test_loader = torch.utils.data.DataLoader(
-    test_dset, batch_size=1, shuffle=False
-)
+test_loader = torch.utils.data.DataLoader(test_dset, batch_size=1, shuffle=False)
 
 encoder = pointnet.DumbPointnet(6, config.encoder_width)
 decoder = decoders.Decoder(
@@ -89,7 +87,9 @@ pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pts.cpu()))
 pcd.colors = o3d.utility.Vector3dVector(rgb.cpu())
 
 query_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(query_coords[j].cpu()))
-query_pcd.colors = o3d.utility.Vector3dVector(plt.cm.jet(.5 + .5 * query_tsdf[j])[:, :3])
+query_pcd.colors = o3d.utility.Vector3dVector(
+    plt.cm.jet(0.5 + 0.5 * query_tsdf[j])[:, :3]
+)
 
 mesh = o3d.geometry.TriangleMesh(
     o3d.utility.Vector3dVector(verts), o3d.utility.Vector3iVector(faces)
