@@ -28,7 +28,7 @@ class PointNetPP(pointnet2.models.PointNet2ClassificationMSG):
 
 
 class DumbPointnetBatchNorm(torch.nn.Module):
-    def __init__(self, pt_dim, feat_width, bnm=.1):
+    def __init__(self, pt_dim, feat_width, bnm=0.1):
         super().__init__()
         self.conv1 = torch.nn.Conv1d(pt_dim, 128, 1)
         self.conv2 = torch.nn.Conv1d(128, 128, 1)
@@ -39,12 +39,8 @@ class DumbPointnetBatchNorm(torch.nn.Module):
 
         self.relu = torch.nn.functional.relu
 
-        self.var = torch.nn.Parameter(
-            torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
-        )
-
     def forward(self, pts):
-        x = torch.cat((pts[..., :3] / self.var, pts[..., 3:]), dim=-1)
+        x = pts
         x = x.transpose(1, 2)
         # x = self.relu(self.conv1(x))
         # x = self.relu(self.conv2(x))
@@ -67,13 +63,6 @@ class DumbPointnet(torch.nn.Module):
             torch.nn.Linear(128, feat_width),
             torch.nn.ReLU(),
         )
-
-        # self.var = torch.nn.Parameter(
-        #     torch.Tensor([1.37907848, 2.33269393, 0.40424237]), requires_grad=False
-        # )
-        # self.var = torch.nn.Parameter(
-        #     torch.Tensor([5, 5, 5]), requires_grad=False
-        # )
 
     def forward(self, pts):
         x = pts
